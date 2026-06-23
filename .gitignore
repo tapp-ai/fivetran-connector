@@ -1,0 +1,20 @@
+# Local runtime config holds the real API key — never commit it.
+configuration.json
+
+# Fivetran SDK local artifacts
+files/
+warehouse.db
+*.duckdb
+
+# Python / uv / tooling caches
+__pycache__/
+*.pyc
+.venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# NOTE: uv.lock is intentionally committed for reproducible installs.

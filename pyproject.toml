@@ -1,0 +1,47 @@
+[project]
+name = "conversion-fivetran-connector"
+version = "0.1.0"
+description = "Fivetran Connector SDK connector that exports Conversion contacts and per-event email engagement into a data warehouse."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Conversion" }]
+keywords = ["fivetran", "connector", "etl", "conversion", "data-warehouse"]
+
+# Fivetran reads THIS file at deploy time (pyproject.toml takes precedence over
+# requirements.txt) and installs `dependencies` with uv. The runtime already
+# pre-installs `requests` and `fivetran_connector_sdk`, so the deployed
+# connector needs NO extra runtime dependencies — declaring a pre-installed
+# package here causes the deploy-time "unable to install required dependencies"
+# error. Keep this empty unless you add a dependency Fivetran does not provide.
+dependencies = []
+
+[project.optional-dependencies]
+# Local-development / standalone tooling. These are NOT installed by Fivetran
+# (uv does not install extras by default) nor by a bare `uv sync` — install them
+# locally with `uv sync --extra dev`. `requests` and the SDK live here so the
+# connector can be imported, debugged, and tested outside the Fivetran runtime.
+dev = [
+    "requests>=2.31",
+    "fivetran-connector-sdk>=1.0",
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.uv]
+# This is a deployable Fivetran connector (a flat connector.py run by the
+# `fivetran` CLI), not an installable library, so uv should not try to build it.
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Make the flat connector.py importable from tests/ without packaging.
+pythonpath = ["."]
