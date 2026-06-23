@@ -6,7 +6,7 @@ warehouse. Licensed under [Apache-2.0](LICENSE).
 
 | Table | Source | Primary key | Notes |
 |---|---|---|---|
-| `contacts` | `POST /v2/exports/contacts` | `id` | One row per contact (lead). Every contact **variable schema** is flattened in as a column keyed by its common name — e.g. `owner_id`, `ajs_anonymous_id`, `first_name`. |
+| `contacts` | `POST /v2/exports/contacts` | `id` | One row per contact (lead). Every contact **variable schema** is flattened in as a column keyed by its common name — e.g. `owner_id`, `first_name`. |
 | `email_send` | `POST /v2/exports/email-events` (`SEND`) | `event_id` | One row per email engagement event. |
 | `email_open` | `…` (`OPEN`) | `event_id` | |
 | `email_click` | `…` (`CLICK`) | `event_id` | Includes `link` (clicked URL). |
@@ -28,7 +28,7 @@ Core columns are typed in `schema()`:
 Every variable schema value is added as an extra column named by the variable's
 key (its "common name"). These are left undeclared in `schema()` so Fivetran
 infers them automatically as the set of variables grows. The Salesforce lead
-owner (`owner_id`) and `ajs_anonymous_id` arrive this way.
+owner (`owner_id`) arrives this way.
 
 ## Email event columns (Marketo `activity_*` mapping)
 
