@@ -6,12 +6,22 @@ warehouse. Licensed under [Apache-2.0](LICENSE).
 
 | Table | Source | Primary key | Notes |
 |---|---|---|---|
-| `contacts` | `POST /v2/exports/contacts` | `id` | One row per contact (lead). Every contact **variable schema** is flattened in as a column keyed by its common name — e.g. `owner_id`, `first_name`. |
-| `email_send` | `POST /v2/exports/email-events` (`SEND`) | `event_id` | One row per email engagement event. |
+| `contacts` | [`POST /v2/exports/contacts`](https://docs.conversion.ai/api-reference/export-contacts) | `id` | One row per contact (lead). Every contact **variable schema** is flattened in as a column keyed by its common name — e.g. `owner_id`, `first_name`. |
+| `email_send` | [`POST /v2/exports/email-events`](https://docs.conversion.ai/api-reference/export-email-events) (`SEND`) | `event_id` | One row per email engagement event. |
 | `email_open` | `…` (`OPEN`) | `event_id` | |
 | `email_click` | `…` (`CLICK`) | `event_id` | Includes `link` (clicked URL). |
 | `email_delivered` | `…` (`DELIVERED`) | `event_id` | `EMAIL_DELIVERY` only. |
 | `email_unsubscribe` | `…` (`UNSUBSCRIBE`) | `event_id` | Folds `UNSUBSCRIBE_ALL` + `TOPIC_UNSUBSCRIBE` (+ legacy); `topic_ids` holds the scope. |
+
+## API docs
+
+This connector uses the Conversion [bulk export APIs](https://docs.conversion.ai/api-reference/export-contacts). Contact your Conversion account team for access to these APIs.
+
+### Authentication
+
+Requests carry the business's API key in the `X-API-Key` header
+(`sk_live_<id>_<secret>`). The API scopes every response to the business that
+owns the key, so the connector never sends a business id.
 
 ## Contact columns
 
@@ -43,12 +53,6 @@ owner (`owner_id`) arrives this way.
 | `sent_email_id` | per-send instance id |
 | `link`, `topic_ids`, `bounce_type`, `error_message` | activity outcome detail |
 | `is_bot` | bot-classified engagement (filter in the warehouse as needed) |
-
-## Authentication
-
-Requests carry the business's API key in the `X-API-Key` header
-(`sk_live_<id>_<secret>`). The API scopes every response to the business that
-owns the key, so the connector never sends a business id.
 
 ## Incremental sync
 
