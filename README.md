@@ -4,14 +4,21 @@ A [Fivetran Connector SDK](https://fivetran.com/docs/connector-sdk) connector
 that exports [Conversion](https://conversion.ai) data into a destination
 warehouse. Licensed under [Apache-2.0](LICENSE).
 
+Each email table requests a single `eventType` from `POST /v2/exports/email-events`; the destination table name is the lowercased event type.
+
 | Table | Source | Primary key | Notes |
 |---|---|---|---|
 | `contacts` | `POST /v2/exports/contacts` | `id` | One row per contact (lead). Every contact **variable schema** is flattened in as a column keyed by its common name — e.g. `owner_id`, `first_name`. |
-| `email_send` | `POST /v2/exports/email-events` (`SEND`) | `event_id` | One row per email engagement event. |
-| `email_open` | `…` (`OPEN`) | `event_id` | |
-| `email_click` | `…` (`CLICK`) | `event_id` | Includes `link` (clicked URL). |
-| `email_delivered` | `…` (`DELIVERED`) | `event_id` | `EMAIL_DELIVERY` only. |
-| `email_unsubscribe` | `…` (`UNSUBSCRIBE`) | `event_id` | Folds `UNSUBSCRIBE_ALL` + `TOPIC_UNSUBSCRIBE` (+ legacy); `topic_ids` holds the scope. |
+| `email_send` | `POST /v2/exports/email-events` (`EMAIL_SEND`) | `event_id` | One row per send event. |
+| `email_delivery` | `…` (`EMAIL_DELIVERY`) | `event_id` | Accepted by the recipient's mail server. |
+| `email_open` | `…` (`EMAIL_OPEN`) | `event_id` | |
+| `email_click` | `…` (`EMAIL_CLICK`) | `event_id` | Includes `link` (clicked URL). |
+| `email_bounce` | `…` (`EMAIL_BOUNCE`) | `event_id` | Hard (permanent) bounces; `bounce_type` / `error_message` carry the detail. |
+| `email_soft_bounce` | `…` (`EMAIL_SOFT_BOUNCE`) | `event_id` | Soft (transient) bounces. |
+| `email_complaint` | `…` (`EMAIL_COMPLAINT`) | `event_id` | Marked as spam by the recipient. |
+| `email_subscription` | `…` (`EMAIL_SUBSCRIPTION`) | `event_id` | (Re-)subscribed; `topic_ids` holds the scope. |
+| `email_unsubscribe_all` | `…` (`EMAIL_UNSUBSCRIBE_ALL`) | `event_id` | Unsubscribed from all email. |
+| `email_topic_unsubscribe` | `…` (`EMAIL_TOPIC_UNSUBSCRIBE`) | `event_id` | Unsubscribed from specific topics; `topic_ids` holds the scope. |
 
 ## Contact columns
 

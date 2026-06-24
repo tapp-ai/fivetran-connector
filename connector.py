@@ -1,15 +1,17 @@
 r"""Fivetran Connector SDK connector for Conversion.
 
-Exports six tables from the Conversion public API into a destination warehouse:
+Exports eleven tables from the Conversion public API into a destination
+warehouse:
 
-  - contacts           one row per contact (lead), with every contact variable
-                       schema flattened in as a column keyed by its common name
-                       (e.g. owner_id, ajs_anonymous_id, first_name, ...).
-  - email_send         \
-  - email_open          \  one row per email engagement event, modelled on
-  - email_click          > Marketo's activity_* tables (id / lead fk / date /
-  - email_delivered     /  campaign fk / email asset / outcome).
-  - email_unsubscribe  /
+  - contacts   one row per contact (lead), with every contact variable schema
+               flattened in as a column keyed by its common name (e.g. owner_id,
+               first_name, ...).
+  - ten per-event email tables (email_send, email_delivery, email_open,
+    email_click, email_bounce, email_soft_bounce, email_complaint,
+    email_subscription, email_unsubscribe_all, email_topic_unsubscribe), each
+    one row per email engagement event of a single EMAIL_* type, modelled on
+    Marketo's activity_* tables (id / lead fk / date / campaign fk / email asset
+    / outcome). See EMAIL_STREAMS for the table -> eventType mapping.
 
 All data is read from the public API using an API key (X-API-Key). The API
 scopes every request to the business that owns the key, so no business id is
@@ -50,13 +52,21 @@ MAX_RETRIES = 4
 BACKOFF_BASE_SECONDS = 2
 REQUEST_TIMEOUT_SECONDS = 60
 
-# The five per-event email tables and the eventType each one requests.
+# The per-event email tables and the EMAIL_* eventType each one requests. The
+# destination table name is the lowercased event type. eventType is matched 1:1
+# against the underlying email event type; see the Conversion export API docs
+# for the full set of exportable types.
 EMAIL_STREAMS = [
-    ("email_send", "SEND"),
-    ("email_open", "OPEN"),
-    ("email_click", "CLICK"),
-    ("email_delivered", "DELIVERED"),
-    ("email_unsubscribe", "UNSUBSCRIBE"),
+    ("email_send", "EMAIL_SEND"),
+    ("email_delivery", "EMAIL_DELIVERY"),
+    ("email_open", "EMAIL_OPEN"),
+    ("email_click", "EMAIL_CLICK"),
+    ("email_bounce", "EMAIL_BOUNCE"),
+    ("email_soft_bounce", "EMAIL_SOFT_BOUNCE"),
+    ("email_complaint", "EMAIL_COMPLAINT"),
+    ("email_subscription", "EMAIL_SUBSCRIPTION"),
+    ("email_unsubscribe_all", "EMAIL_UNSUBSCRIBE_ALL"),
+    ("email_topic_unsubscribe", "EMAIL_TOPIC_UNSUBSCRIBE"),
 ]
 
 
@@ -229,11 +239,12 @@ def _normalize_ts(value: Any) -> Any:
 def _map_contact(contact: dict) -> dict:
     """Flatten a contact into a warehouse row.
 
-    Variable schemas are spread in first, keyed by their common name; core
-    columns are written afterwards so they always win on any key collision.
+    The API returns the contact's variable schemas under "fields", keyed by
+    their common name; they are spread in first, and core columns are written
+    afterwards so they always win on any key collision.
     """
     row: dict[str, Any] = {}
-    for key, value in (contact.get("variables") or {}).items():
+    for key, value in (contact.get("fields") or {}).items():
         row[key] = value
 
     row.update(
