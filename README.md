@@ -6,18 +6,20 @@ warehouse. Licensed under [Apache-2.0](LICENSE).
 
 Each email table requests a single `eventType` from `POST /v2/exports/email-events`; the destination table name is the lowercased event type.
 
-| Table | Source | Primary key | Notes |
-|---|---|---|---|
-| `contacts` | `POST /v2/exports/contacts` | `id` | One row per contact (lead). Every contact **variable schema** is flattened in as a column keyed by its common name — e.g. `owner_id`, `first_name`. |
-| `email_send` | `POST /v2/exports/email-events` (`EMAIL_SEND`) | `event_id` | One row per send event. |
-| `email_delivery` | `…` (`EMAIL_DELIVERY`) | `event_id` | Accepted by the recipient's mail server. |
-| `email_open` | `…` (`EMAIL_OPEN`) | `event_id` | |
-| `email_click` | `…` (`EMAIL_CLICK`) | `event_id` | Includes `link` (clicked URL). |
-| `email_bounce` | `…` (`EMAIL_BOUNCE`) | `event_id` | Hard (permanent) bounces; `bounce_type` / `error_message` carry the detail. |
-| `email_soft_bounce` | `…` (`EMAIL_SOFT_BOUNCE`) | `event_id` | Soft (transient) bounces. |
-| `email_complaint` | `…` (`EMAIL_COMPLAINT`) | `event_id` | Marked as spam by the recipient. |
-| `email_unsubscribe_all` | `…` (`EMAIL_UNSUBSCRIBE_ALL`) | `event_id` | Unsubscribed from all email. |
-| `email_topic_unsubscribe` | `…` (`EMAIL_TOPIC_UNSUBSCRIBE`) | `event_id` | Unsubscribed from specific topics; `topic_ids` holds the scope. |
+
+| Table                     | Source                                         | Primary key | Notes                                                                                                                                |
+| ------------------------- | ---------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `contacts`                | `POST /v2/exports/contacts`                    | `id`        | One row per contact. Every contact field is flattened in as its own column keyed by its common name (e.g. `first_name`, `owner_id`). |
+| `email_send`              | `POST /v2/exports/email-events` (`EMAIL_SEND`) | `event_id`  | One row per send event.                                                                                                              |
+| `email_delivery`          | `…` (`EMAIL_DELIVERY`)                         | `event_id`  | The email was accepted by the recipient's mail server.                                                                               |
+| `email_open`              | `…` (`EMAIL_OPEN`)                             | `event_id`  | One row per open event.                                                                                                              |
+| `email_click`             | `…` (`EMAIL_CLICK`)                            | `event_id`  | Includes `link`, the clicked URL.                                                                                                    |
+| `email_bounce`            | `…` (`EMAIL_BOUNCE`)                           | `event_id`  | Hard (permanent) bounces.                                                                                                            |
+| `email_soft_bounce`       | `…` (`EMAIL_SOFT_BOUNCE`)                      | `event_id`  | Soft (transient) bounces.                                                                                                            |
+| `email_complaint`         | `…` (`EMAIL_COMPLAINT`)                        | `event_id`  | The recipient marked the email as spam.                                                                                              |
+| `email_unsubscribe_all`   | `…` (`EMAIL_UNSUBSCRIBE_ALL`)                  | `event_id`  | The recipient unsubscribed from all email.                                                                                           |
+| `email_topic_unsubscribe` | `…` (`EMAIL_TOPIC_UNSUBSCRIBE`)                | `event_id`  | The recipient unsubscribed from specific topics.                                                                                     |
+
 
 ## API docs
 
@@ -51,54 +53,29 @@ key (its "common name"). These are left undeclared in `schema()` so Fivetran inf
 
 ## Email event columns
 
-### Shared columns
-
-Shared across the `email_`* tables and typed in `schema()`:
-
-
-| Name            | Data type      | Description                                                                   |
-| --------------- | -------------- | ----------------------------------------------------------------------------- |
-| `event_id`      | `STRING`       | Event primary key.                                                            |
-| `contact_id`    | `STRING`       | The contact this event belongs to; joins `contacts.id`.                       |
-| `occurred_at`   | `UTC_DATETIME` | When the event occurred.                                                      |
-| `event_type`    | `STRING`       | The kind of event: `SEND`, `OPEN`, `CLICK`, `DELIVERED`, or `UNSUBSCRIBE`.    |
-| `source_type`   | `STRING`       | The kind of flow that sent the email: `WORKFLOW` or `BLAST`.                  |
-| `source_id`     | `STRING`       | Id of the sending flow: either the `WORKFLOW` id or `BLAST` id.               |
-| `email_id`      | `STRING`       | Id of the email asset.                                                        |
-| `email_name`    | `STRING`       | Name of the email asset, resolved server-side.                                |
-| `sent_email_id` | `STRING`       | Per-send instance id.                                                         |
-| `is_bot`        | `BOOLEAN`      | Whether the engagement was bot-classified; filter in the warehouse as needed. |
+Every `email_`* table is declared in `schema()` with the same columns. The
+**Tables** column lists which tables actually populate each column (`all` =
+every `email_`* table): the shared columns are populated everywhere, while the
+rest carry data only for the event types noted (e.g. `email_open` and
+`email_delivery` carry only the shared columns).
 
 
-### Table-specific columns
-
-These columns are declared on every `email_*` table but only populated for the
-event type noted below. `email_open` and `email_delivered` carry only the
-shared columns above.
-
-#### `email_click`
-
-
-| Name   | Data type | Description                   |
-| ------ | --------- | ----------------------------- |
-| `link` | `STRING`  | The clicked URL in the email. |
-
-
-#### `email_unsubscribe`
-
-
-| Name        | Data type | Description                                                                                                                                                                                              |
-| ----------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `topic_ids` | `STRING`  | Stringified array of topic ids the recipient unsubscribed from.Only populated if recipient unsubscribed from specific topics; if the user subscribed from all communication, no topic ids are returned. |
-
-
-#### `email_send`
-
-
-| Name            | Data type | Description                                                                                                     |
-| --------------- | --------- | --------------------------------------------------------------------------------------------------------------- |
-| `bounce_type`   | `STRING`  | Bounce classification ("Permanent," "Transient," "Undetermined"); only populated for entries that were bounces. |
-| `error_message` | `STRING`  | SMTP diagnostic code (e.g. `smtp; 550 5.1.1 user unknown`); only populated for entries that were bounces.       |
+| Name            | Data type      | Tables                              | Description                                                                                                                                                                                              |
+| --------------- | -------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `event_id`      | `STRING`       | all                                 | Event primary key.                                                                                                                                                                                       |
+| `contact_id`    | `STRING`       | all                                 | The contact this event belongs to; joins `contacts.id`.                                                                                                                                                  |
+| `occurred_at`   | `UTC_DATETIME` | all                                 | When the event occurred.                                                                                                                                                                                 |
+| `event_type`    | `STRING`       | all                                 | The kind of event: `SEND`, `OPEN`, `CLICK`, `DELIVERED`, or `UNSUBSCRIBE`.                                                                                                                               |
+| `source_type`   | `STRING`       | all                                 | The kind of flow that sent the email: `WORKFLOW` or `BLAST`.                                                                                                                                             |
+| `source_id`     | `STRING`       | all                                 | Id of the sending flow: either the `WORKFLOW` id or `BLAST` id.                                                                                                                                          |
+| `email_id`      | `STRING`       | all                                 | Id of the email asset.                                                                                                                                                                                   |
+| `email_name`    | `STRING`       | all                                 | Name of the email asset, resolved server-side.                                                                                                                                                           |
+| `sent_email_id` | `STRING`       | all                                 | Per-send instance id.                                                                                                                                                                                    |
+| `is_bot`        | `BOOLEAN`      | all                                 | Whether the engagement was bot-classified; filter in the warehouse as needed.                                                                                                                            |
+| `link`          | `STRING`       | `email_click`                       | The clicked URL in the email.                                                                                                                                                                            |
+| `topic_ids`     | `STRING`       | `email_topic_unsubscribe`           | Stringified array of topic ids the recipient unsubscribed from. Only populated if recipient unsubscribed from specific topics; if the user subscribed from all communication, no topic ids are returned. |
+| `bounce_type`   | `STRING`       | `email_bounce`, `email_soft_bounce` | Bounce classification `Permanent`, `Transient`, `Undetermined`)                                                                                                                                          |
+| `error_message` | `STRING`       | `email_bounce`, `email_soft_bounce` | SMTP diagnostic code (e.g. `smtp; 550 5.1.1 user unknown`)                                                                                                                                               |
 
 
 ## Incremental sync

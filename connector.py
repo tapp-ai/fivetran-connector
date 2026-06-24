@@ -3,15 +3,14 @@ r"""Fivetran Connector SDK connector for Conversion.
 Exports ten tables from the Conversion public API into a destination
 warehouse:
 
-  - contacts   one row per contact (lead), with every contact variable schema
+  - contacts   one row per contact, with every contact field
                flattened in as a column keyed by its common name (e.g. owner_id,
                first_name, ...).
   - nine per-event email tables (email_send, email_delivery, email_open,
     email_click, email_bounce, email_soft_bounce, email_complaint,
     email_unsubscribe_all, email_topic_unsubscribe), each one row per email
-    engagement event of a single EMAIL_* type, modelled on Marketo's activity_*
-    tables (id / lead fk / date / campaign fk / email asset / outcome). See
-    EMAIL_STREAMS for the table -> eventType mapping.
+    engagement event of a single EMAIL_* type.
+    See EMAIL_STREAMS for the table -> eventType mapping.
 
 All data is read from the public API using an API key (X-API-Key). The API
 scopes every request to the business that owns the key, so no business id is
@@ -75,10 +74,10 @@ EMAIL_STREAMS = [
 def schema(configuration: dict) -> list[dict]:
     """Declare the destination tables and their primary keys.
 
-    Only the stable, known columns are typed here. Contact variable-schema
-    columns are intentionally left undeclared so Fivetran infers them from the
-    upserted data — that is what lets every variable schema surface as its own
-    column keyed by its common name without hardcoding the set.
+    Only the stable, known columns are typed here. Contact field columns are
+    intentionally left undeclared so Fivetran infers them from the upserted
+    data — that is what lets every field surface as its own column keyed by its
+    common name without hardcoding the set.
     """
     _require_config(configuration)
 
@@ -238,7 +237,7 @@ def _normalize_ts(value: Any) -> Any:
 def _map_contact(contact: dict) -> dict:
     """Flatten a contact into a warehouse row.
 
-    The API returns the contact's variable schemas under "fields", keyed by
+    The API returns the contact's fields under "fields", keyed by
     their common name; they are spread in first, and core columns are written
     afterwards so they always win on any key collision.
     """
@@ -262,7 +261,7 @@ def _map_contact(contact: dict) -> dict:
 
 
 def _map_email_event(event: dict) -> dict:
-    """Map one email event onto its warehouse row (Marketo activity_* shape)."""
+    """Map one email event onto its warehouse row."""
     return {
         "event_id": event.get("eventId"),
         "contact_id": event.get("contactId"),
