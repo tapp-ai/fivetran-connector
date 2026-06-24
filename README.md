@@ -16,7 +16,6 @@ Each email table requests a single `eventType` from `POST /v2/exports/email-even
 | `email_bounce` | `…` (`EMAIL_BOUNCE`) | `event_id` | Hard (permanent) bounces; `bounce_type` / `error_message` carry the detail. |
 | `email_soft_bounce` | `…` (`EMAIL_SOFT_BOUNCE`) | `event_id` | Soft (transient) bounces. |
 | `email_complaint` | `…` (`EMAIL_COMPLAINT`) | `event_id` | Marked as spam by the recipient. |
-| `email_subscription` | `…` (`EMAIL_SUBSCRIPTION`) | `event_id` | (Re-)subscribed; `topic_ids` holds the scope. |
 | `email_unsubscribe_all` | `…` (`EMAIL_UNSUBSCRIBE_ALL`) | `event_id` | Unsubscribed from all email. |
 | `email_topic_unsubscribe` | `…` (`EMAIL_TOPIC_UNSUBSCRIBE`) | `event_id` | Unsubscribed from specific topics; `topic_ids` holds the scope. |
 

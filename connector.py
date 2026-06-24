@@ -1,17 +1,17 @@
 r"""Fivetran Connector SDK connector for Conversion.
 
-Exports eleven tables from the Conversion public API into a destination
+Exports ten tables from the Conversion public API into a destination
 warehouse:
 
   - contacts   one row per contact (lead), with every contact variable schema
                flattened in as a column keyed by its common name (e.g. owner_id,
                first_name, ...).
-  - ten per-event email tables (email_send, email_delivery, email_open,
+  - nine per-event email tables (email_send, email_delivery, email_open,
     email_click, email_bounce, email_soft_bounce, email_complaint,
-    email_subscription, email_unsubscribe_all, email_topic_unsubscribe), each
-    one row per email engagement event of a single EMAIL_* type, modelled on
-    Marketo's activity_* tables (id / lead fk / date / campaign fk / email asset
-    / outcome). See EMAIL_STREAMS for the table -> eventType mapping.
+    email_unsubscribe_all, email_topic_unsubscribe), each one row per email
+    engagement event of a single EMAIL_* type, modelled on Marketo's activity_*
+    tables (id / lead fk / date / campaign fk / email asset / outcome). See
+    EMAIL_STREAMS for the table -> eventType mapping.
 
 All data is read from the public API using an API key (X-API-Key). The API
 scopes every request to the business that owns the key, so no business id is
@@ -64,7 +64,6 @@ EMAIL_STREAMS = [
     ("email_bounce", "EMAIL_BOUNCE"),
     ("email_soft_bounce", "EMAIL_SOFT_BOUNCE"),
     ("email_complaint", "EMAIL_COMPLAINT"),
-    ("email_subscription", "EMAIL_SUBSCRIPTION"),
     ("email_unsubscribe_all", "EMAIL_UNSUBSCRIBE_ALL"),
     ("email_topic_unsubscribe", "EMAIL_TOPIC_UNSUBSCRIBE"),
 ]
