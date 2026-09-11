@@ -6,19 +6,44 @@ warehouse. Licensed under [Apache-2.0](LICENSE).
 
 Each email table requests a single `eventType` from `POST /v2/exports/email-events`; the destination table name is the lowercased event type.
 
+Which tables sync is controlled by the `tables` configuration value (see
+[Table selection](#table-selection)). The **Group** column is the name to list
+there.
 
-| Table                     | Source                                         | Primary key | Notes                                                                                                                                |
-| ------------------------- | ---------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `contacts`                | `POST /v2/exports/contacts`                    | `id`        | One row per contact. Every contact field is flattened in as its own column keyed by its common name (e.g. `first_name`, `owner_id`). |
-| `email_send`              | `POST /v2/exports/email-events` (`EMAIL_SEND`) | `event_id`  | One row per send event.                                                                                                              |
-| `email_delivery`          | `…` (`EMAIL_DELIVERY`)                         | `event_id`  | The email was accepted by the recipient's mail server.                                                                               |
-| `email_open`              | `…` (`EMAIL_OPEN`)                             | `event_id`  | One row per open event.                                                                                                              |
-| `email_click`             | `…` (`EMAIL_CLICK`)                            | `event_id`  | Includes `link`, the clicked URL.                                                                                                    |
-| `email_bounce`            | `…` (`EMAIL_BOUNCE`)                           | `event_id`  | Hard (permanent) bounces.                                                                                                            |
-| `email_soft_bounce`       | `…` (`EMAIL_SOFT_BOUNCE`)                      | `event_id`  | Soft (transient) bounces.                                                                                                            |
-| `email_complaint`         | `…` (`EMAIL_COMPLAINT`)                        | `event_id`  | The recipient marked the email as spam.                                                                                              |
-| `email_unsubscribe_all`   | `…` (`EMAIL_UNSUBSCRIBE_ALL`)                  | `event_id`  | The recipient unsubscribed from all email.                                                                                           |
-| `email_topic_unsubscribe` | `…` (`EMAIL_TOPIC_UNSUBSCRIBE`)                | `event_id`  | The recipient unsubscribed from specific topics.                                                                                     |
+
+| Table                     | Group           | Source                                         | Primary key | Notes                                                                                                                                |
+| ------------------------- | --------------- | ---------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `contacts`                | `contacts`      | `POST /v2/exports/contacts`                    | `id`        | One row per contact. Every contact field is flattened in as its own column keyed by its common name (e.g. `first_name`, `owner_id`). |
+| `custom_events`           | `custom_events` | `POST /v2/exports/custom-events`               | `event_id`  | One row per custom (behavioral) event. Opt-in: not synced unless listed in `tables`.                                                 |
+| `email_send`              | `email`         | `POST /v2/exports/email-events` (`EMAIL_SEND`) | `event_id`  | One row per send event.                                                                                                              |
+| `email_delivery`          | `email`         | `…` (`EMAIL_DELIVERY`)                         | `event_id`  | The email was accepted by the recipient's mail server.                                                                               |
+| `email_open`              | `email`         | `…` (`EMAIL_OPEN`)                             | `event_id`  | One row per open event.                                                                                                              |
+| `email_click`             | `email`         | `…` (`EMAIL_CLICK`)                            | `event_id`  | Includes `link`, the clicked URL.                                                                                                    |
+| `email_bounce`            | `email`         | `…` (`EMAIL_BOUNCE`)                           | `event_id`  | Hard (permanent) bounces.                                                                                                            |
+| `email_soft_bounce`       | `email`         | `…` (`EMAIL_SOFT_BOUNCE`)                      | `event_id`  | Soft (transient) bounces.                                                                                                            |
+| `email_complaint`         | `email`         | `…` (`EMAIL_COMPLAINT`)                        | `event_id`  | The recipient marked the email as spam.                                                                                              |
+| `email_unsubscribe_all`   | `email`         | `…` (`EMAIL_UNSUBSCRIBE_ALL`)                  | `event_id`  | The recipient unsubscribed from all email.                                                                                           |
+| `email_topic_unsubscribe` | `email`         | `…` (`EMAIL_TOPIC_UNSUBSCRIBE`)                | `event_id`  | The recipient unsubscribed from specific topics.                                                                                     |
+
+## Table selection
+
+`tables` is an optional, comma-separated list of groups and/or table names. A
+table that is not listed is neither declared in the schema nor synced, so it
+never appears in the destination.
+
+
+| `tables`                         | Syncs                                                     |
+| -------------------------------- | --------------------------------------------------------- |
+| *(unset)*                        | `contacts` and every `email_*` table (the original set).  |
+| `custom_events`                  | Only `custom_events`.                                     |
+| `contacts,email,custom_events`   | Everything.                                               |
+| `contacts,email_click`           | Groups and single tables mix freely.                      |
+
+
+Unknown names fail the sync at startup. Fivetran's own schema tab still works as
+a per-table opt-out on top of this. Changing `tables` after the first sync only
+adds or removes tables going forward; trigger a resync if you need history for a
+newly added table.
 
 
 ## API docs
@@ -78,14 +103,36 @@ rest carry data only for the event types noted (e.g. `email_open` and
 | `error_message` | `STRING`       | `email_bounce`, `email_soft_bounce` | SMTP diagnostic code (e.g. `smtp; 550 5.1.1 user unknown`)                                                                                                                                               |
 
 
+## Custom event columns
+
+
+| Name              | Data type      | Description                                                                                                               |
+| ----------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `event_id`        | `STRING`       | Event primary key.                                                                                                        |
+| `contact_id`      | `STRING`       | The contact this event belongs to; joins `contacts.id`.                                                                   |
+| `occurred_at`     | `UTC_DATETIME` | When the event occurred (caller-supplied; may be backdated).                                                              |
+| `created_at`      | `UTC_DATETIME` | When Conversion recorded the event.                                                                                       |
+| `event_name`      | `STRING`       | The custom event name, e.g. `signed_up`.                                                                                  |
+| `source`          | `STRING`       | How the event was recorded (API, SDK, workflow, …).                                                                       |
+| `contact_email`   | `STRING`       | The contact's **current** email, resolved at export time; null once the contact is deleted.                              |
+| `user_id`         | `STRING`       | The contact's **current** external user id, resolved at export time; null once the contact is deleted.                   |
+| `client_event_id` | `STRING`       | Caller-supplied idempotency id, when one was sent.                                                                        |
+| `data`            | `JSON`         | The event payload object. Its keys vary per event name and are lowercased on ingestion; query it with your warehouse's JSON functions. |
+
+
 ## Incremental sync
 
 Each table keeps its own **opaque cursor** in connector `state`, keyed by table
-(`contacts_cursor`, `email_send_cursor`, …). The connector never interprets the
-cursor; it just stores whatever the API last returned and sends it back.
+(`contacts_cursor`, `email_send_cursor`, `custom_events_cursor`, …). The
+connector never interprets the cursor; it just stores whatever the API last
+returned and sends it back.
 
 Every request posts `{"limit": 1000, "cursor": <saved cursor>}` (the email
-tables also send `eventType`). The response envelope is
+tables also send `eventType`). `custom_events` is a windowed export: its very
+first request sends `{"occurredAt": {"start": "2020-01-01T00:00:00Z"}}` instead
+of a cursor, and every later request sends only the cursor. No `end` is sent, so
+the server re-resolves "now" on each request and the stored cursor keeps
+advancing into new events on every sync. The response envelope is
 `{"data": {…}, "pagination": {"nextCursor": …}}`; the connector reads rows from
 `data` and the next cursor from `pagination.nextCursor`.
 
@@ -106,9 +153,14 @@ cp configuration.example.json configuration.json
 # then edit configuration.json:
 # {
 #   "base_url": "https://pub-api.conversion.ai/api",
-#   "api_key": "sk_live_<id>_<secret>"
+#   "api_key": "sk_live_<id>_<secret>",
+#   "tables": "contacts,email"        # optional; see Table selection
 # }
 ```
+
+All values are strings (a Fivetran Connector SDK requirement). After deploy the
+same values are editable in the connection's setup form in the Fivetran
+dashboard.
 
 ## Development
 

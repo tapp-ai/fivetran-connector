@@ -1,6 +1,6 @@
 r"""Fivetran Connector SDK connector for Conversion.
 
-Exports ten tables from the Conversion public API into a destination
+Exports up to eleven tables from the Conversion public API into a destination
 warehouse:
 
   - contacts   one row per contact, with every contact field
@@ -11,6 +11,8 @@ warehouse:
     email_unsubscribe_all, email_topic_unsubscribe), each one row per email
     engagement event of a single EMAIL_* type.
     See EMAIL_STREAMS for the table -> eventType mapping.
+  - custom_events  one row per custom (behavioral) event recorded against a
+               contact. Opt-in: see "Table selection" below.
 
 All data is read from the public API using an API key (X-API-Key). The API
 scopes every request to the business that owns the key, so no business id is
@@ -29,6 +31,21 @@ persist it and checkpoint after every page, then resume from the stored cursor
 on the next sync. Paging stops only once the cursor is exhausted (null) or stops
 advancing — a short page is NOT end-of-stream. Rows are upserted by primary key
 (``id`` / ``event_id``), so any row the API re-emits updates in place.
+
+The custom_events endpoint is a windowed walk rather than a plain cursor: the
+FIRST request carries ``occurredAt.start`` and every later request carries only
+the cursor. We send a fixed early start with no end, so the server re-resolves
+``now()`` on every request and the stored cursor keeps advancing into new events
+across syncs exactly like the other tables.
+
+Table selection
+---------------
+The optional ``tables`` configuration value is a comma-separated list of table
+names and/or groups (``contacts``, ``email``, ``custom_events``; ``email``
+expands to every ``email_*`` table). Unlisted tables are neither declared in the
+schema nor synced. When ``tables`` is unset the connector syncs ``contacts`` and
+``email`` — exactly what it synced before this option existed — so existing
+connections are unaffected by a redeploy.
 """
 
 from __future__ import annotations
@@ -67,6 +84,49 @@ EMAIL_STREAMS = [
     ("email_topic_unsubscribe", "EMAIL_TOPIC_UNSUBSCRIBE"),
 ]
 
+# Fixed floor for the custom_events walk. Sent only on the very first request
+# (before any cursor exists); afterwards the cursor carries the range. The
+# server bounds each internal query, so a long range is safe.
+CUSTOM_EVENTS_START = "2020-01-01T00:00:00Z"
+
+# Table groups accepted in the `tables` configuration value. Individual table
+# names are also accepted.
+TABLE_GROUPS: dict[str, list[str]] = {
+    "contacts": ["contacts"],
+    "email": [table for table, _ in EMAIL_STREAMS],
+    "custom_events": ["custom_events"],
+}
+ALL_TABLES: list[str] = [t for group in TABLE_GROUPS.values() for t in group]
+
+# What syncs when `tables` is unset: the pre-existing table set.
+DEFAULT_TABLES = "contacts,email"
+
+
+def _resolve_tables(configuration: dict) -> set[str]:
+    """Return the set of destination tables enabled by ``configuration``.
+
+    Fivetran passes every configuration value as a string, so ``tables`` is a
+    comma-separated list. Unknown names fail fast rather than silently syncing
+    nothing.
+    """
+    raw = (configuration.get("tables") or DEFAULT_TABLES).strip()
+    enabled: set[str] = set()
+    for name in (part.strip() for part in raw.split(",")):
+        if not name:
+            continue
+        if name in TABLE_GROUPS:
+            enabled.update(TABLE_GROUPS[name])
+        elif name in ALL_TABLES:
+            enabled.add(name)
+        else:
+            raise ValueError(
+                f"unknown table '{name}' in configuration 'tables'; "
+                f"expected any of {', '.join(list(TABLE_GROUPS) + ALL_TABLES)}"
+            )
+    if not enabled:
+        raise ValueError("configuration 'tables' selects no tables")
+    return enabled
+
 
 # --------------------------------------------------------------------------- #
 #                                   Schema                                     #
@@ -80,45 +140,69 @@ def schema(configuration: dict) -> list[dict]:
     common name without hardcoding the set.
     """
     _require_config(configuration)
+    enabled = _resolve_tables(configuration)
 
-    return [
-        {
-            "table": "contacts",
-            "primary_key": ["id"],
-            "columns": {
-                "id": "STRING",
-                "sfdc_lead_id": "STRING",
-                "sfdc_contact_id": "STRING",
-                "sfdc_account_id": "STRING",
-                "email": "STRING",
-                "subscription_status": "STRING",
-                "created_at": "UTC_DATETIME",
-                "updated_at": "UTC_DATETIME",
+    tables: list[dict] = (
+        [
+            {
+                "table": "contacts",
+                "primary_key": ["id"],
+                "columns": {
+                    "id": "STRING",
+                    "sfdc_lead_id": "STRING",
+                    "sfdc_contact_id": "STRING",
+                    "sfdc_account_id": "STRING",
+                    "email": "STRING",
+                    "subscription_status": "STRING",
+                    "created_at": "UTC_DATETIME",
+                    "updated_at": "UTC_DATETIME",
+                },
             },
-        },
-    ] + [
-        {
-            "table": table,
-            "primary_key": ["event_id"],
-            "columns": {
-                "event_id": "STRING",
-                "contact_id": "STRING",
-                "occurred_at": "UTC_DATETIME",
-                "event_type": "STRING",
-                "source_type": "STRING",
-                "source_id": "STRING",
-                "email_id": "STRING",
-                "email_name": "STRING",
-                "sent_email_id": "STRING",
-                "is_bot": "BOOLEAN",
-                "link": "STRING",
-                "topic_ids": "STRING",
-                "bounce_type": "STRING",
-                "error_message": "STRING",
+        ]
+        + [
+            {
+                "table": table,
+                "primary_key": ["event_id"],
+                "columns": {
+                    "event_id": "STRING",
+                    "contact_id": "STRING",
+                    "occurred_at": "UTC_DATETIME",
+                    "event_type": "STRING",
+                    "source_type": "STRING",
+                    "source_id": "STRING",
+                    "email_id": "STRING",
+                    "email_name": "STRING",
+                    "sent_email_id": "STRING",
+                    "is_bot": "BOOLEAN",
+                    "link": "STRING",
+                    "topic_ids": "STRING",
+                    "bounce_type": "STRING",
+                    "error_message": "STRING",
+                },
+            }
+            for table, _event_type in EMAIL_STREAMS
+        ]
+        + [
+            {
+                "table": "custom_events",
+                "primary_key": ["event_id"],
+                "columns": {
+                    "event_id": "STRING",
+                    "contact_id": "STRING",
+                    "occurred_at": "UTC_DATETIME",
+                    "created_at": "UTC_DATETIME",
+                    "event_name": "STRING",
+                    "source": "STRING",
+                    "contact_email": "STRING",
+                    "user_id": "STRING",
+                    "client_event_id": "STRING",
+                    # The event payload object; its shape varies per event.
+                    "data": "JSON",
+                },
             },
-        }
-        for table, _event_type in EMAIL_STREAMS
-    ]
+        ]
+    )
+    return [t for t in tables if t["table"] in enabled]
 
 
 # --------------------------------------------------------------------------- #
@@ -130,24 +214,28 @@ def update(configuration: dict, state: dict) -> Iterable[Any]:
     base_url = configuration["base_url"].rstrip("/")
     api_key = configuration["api_key"]
     state = dict(state or {})
+    enabled = _resolve_tables(configuration)
 
-    log.info("Conversion connector: starting sync")
+    log.info(f"Conversion connector: starting sync of {', '.join(sorted(enabled))}")
 
     # Contacts ---------------------------------------------------------------
-    yield from _sync_stream(
-        base_url=base_url,
-        api_key=api_key,
-        table="contacts",
-        path="/v2/exports/contacts",
-        body_extra={},
-        rows_key="contacts",
-        state=state,
-        state_key="contacts_cursor",
-        row_mapper=_map_contact,
-    )
+    if "contacts" in enabled:
+        yield from _sync_stream(
+            base_url=base_url,
+            api_key=api_key,
+            table="contacts",
+            path="/v2/exports/contacts",
+            body_extra={},
+            rows_key="contacts",
+            state=state,
+            state_key="contacts_cursor",
+            row_mapper=_map_contact,
+        )
 
     # Email events -----------------------------------------------------------
     for table, event_type in EMAIL_STREAMS:
+        if table not in enabled:
+            continue
         yield from _sync_stream(
             base_url=base_url,
             api_key=api_key,
@@ -158,6 +246,23 @@ def update(configuration: dict, state: dict) -> Iterable[Any]:
             state=state,
             state_key=f"{table}_cursor",
             row_mapper=_map_email_event,
+        )
+
+    # Custom events ----------------------------------------------------------
+    # Windowed endpoint: occurredAt goes on the first request only; the cursor
+    # carries the range afterwards and the two are mutually exclusive.
+    if "custom_events" in enabled:
+        yield from _sync_stream(
+            base_url=base_url,
+            api_key=api_key,
+            table="custom_events",
+            path="/v2/exports/custom-events",
+            body_extra={},
+            rows_key="events",
+            state=state,
+            state_key="custom_events_cursor",
+            row_mapper=_map_custom_event,
+            first_page_extra={"occurredAt": {"start": CUSTOM_EVENTS_START}},
         )
 
     log.info("Conversion connector: sync complete")
@@ -173,8 +278,12 @@ def _sync_stream(
     state: dict,
     state_key: str,
     row_mapper: Callable[[dict], dict],
+    first_page_extra: dict[str, Any] | None = None,
 ) -> Iterable[Any]:
     """Page one table to exhaustion, upserting rows and checkpointing cursors.
+
+    ``body_extra`` is sent on every request; ``first_page_extra`` only when no
+    cursor exists yet (for endpoints whose cursor carries the initial range).
 
     Paging is driven by the API's ``pagination.nextCursor``, NOT by page length —
     a short page is not end-of-stream. ListContactsV5 silently drops ids that are
@@ -191,6 +300,8 @@ def _sync_stream(
         body: dict[str, Any] = {"limit": PAGE_LIMIT, **body_extra}
         if cursor:
             body["cursor"] = cursor
+        elif first_page_extra:
+            body.update(first_page_extra)
 
         payload = _post(base_url, api_key, path, body)
         data = payload.get("data") or {}
@@ -277,6 +388,28 @@ def _map_email_event(event: dict) -> dict:
         "topic_ids": event.get("topicIds"),
         "bounce_type": event.get("bounceType"),
         "error_message": event.get("errorMessage"),
+    }
+
+
+def _map_custom_event(event: dict) -> dict:
+    """Map one custom event onto its warehouse row.
+
+    ``data`` is a free-form JSON object whose keys vary per event name, so it is
+    stored in a single ``JSON`` column rather than flattened. It is passed
+    through as the parsed object: the SDK serializes declared ``JSON`` columns
+    itself (a pre-serialized string would be double-encoded).
+    """
+    return {
+        "event_id": event.get("eventId"),
+        "contact_id": event.get("contactId"),
+        "occurred_at": _normalize_ts(event.get("occurredAt")),
+        "created_at": _normalize_ts(event.get("createdAt")),
+        "event_name": event.get("eventName"),
+        "source": event.get("source"),
+        "contact_email": event.get("contactEmail"),
+        "user_id": event.get("userId"),
+        "client_event_id": event.get("clientEventId"),
+        "data": event.get("data"),
     }
 
 

@@ -107,6 +107,87 @@ def test_schema_requires_config():
         connector.schema({"base_url": "x"})  # missing api_key
 
 
+def test_tables_config_selects_tables():
+    # Unset -> the pre-existing set (contacts + email), never custom_events.
+    assert connector._resolve_tables(CONFIG) == {"contacts", *dict(connector.EMAIL_STREAMS)}
+    # A customer that only wants custom events gets exactly that table.
+    only_custom = {**CONFIG, "tables": "custom_events"}
+    assert connector._resolve_tables(only_custom) == {"custom_events"}
+    assert [t["table"] for t in connector.schema(only_custom)] == ["custom_events"]
+    # Groups and individual names mix; whitespace is tolerated.
+    mixed = {**CONFIG, "tables": " contacts, email_click ,custom_events "}
+    assert connector._resolve_tables(mixed) == {"contacts", "email_click", "custom_events"}
+    # Unknown names and empty selections fail fast.
+    with pytest.raises(ValueError, match="unknown table 'bogus'"):
+        connector._resolve_tables({**CONFIG, "tables": "contacts,bogus"})
+    with pytest.raises(ValueError, match="selects no tables"):
+        connector._resolve_tables({**CONFIG, "tables": " , "})
+
+
+def test_update_custom_events_only_sends_range_once_and_skips_other_tables(patch_requests):
+    # Page 1 must carry occurredAt.start and no cursor; later pages carry only
+    # the cursor (the server rejects both together). A resumed sync (cursor in
+    # state) must also omit occurredAt.
+    seen_bodies: list[dict] = []
+    pages = {
+        None: (
+            {
+                "events": [
+                    {
+                        "eventId": "ce1",
+                        "contactId": "c1",
+                        "occurredAt": "2026-06-01T10:00:00.123456789Z",
+                        "createdAt": "2026-06-01T10:00:01Z",
+                        "eventName": "signed_up",
+                        "source": "API",
+                        "contactEmail": "a@x.com",
+                        "userId": "u-1",
+                        "clientEventId": "msg-1",
+                        "data": {"plan": "pro", "seats": 3},
+                    }
+                ]
+            },
+            "cur-1",
+        ),
+        "cur-1": ({"events": [{"eventId": "ce2", "contactId": "c2", "data": None}]}, None),
+    }
+
+    def handler(url, body):
+        assert url.endswith("/v2/exports/custom-events"), url  # no other tables hit
+        seen_bodies.append(body)
+        data, next_cursor = pages[body.get("cursor")]
+        return _FakeResp(_envelope(data, next_cursor))
+
+    patch_requests(handler)
+    ops = list(connector.update({**CONFIG, "tables": "custom_events"}, {}))
+
+    assert seen_bodies[0] == {
+        "limit": connector.PAGE_LIMIT,
+        "occurredAt": {"start": connector.CUSTOM_EVENTS_START},
+    }
+    assert seen_bodies[1] == {"limit": connector.PAGE_LIMIT, "cursor": "cur-1"}
+
+    rows = [o[2] for o in ops if o[0] == "upsert"]
+    assert [r["event_id"] for r in rows] == ["ce1", "ce2"]
+    assert all(o[1] == "custom_events" for o in ops if o[0] == "upsert")
+    assert rows[0]["event_name"] == "signed_up" and rows[0]["source"] == "API"
+    assert rows[0]["contact_email"] == "a@x.com" and rows[0]["user_id"] == "u-1"
+    assert rows[0]["client_event_id"] == "msg-1"
+    assert rows[0]["occurred_at"] == "2026-06-01T10:00:00.123456Z"
+    # `data` is passed through as the parsed object: the SDK json.dumps declared
+    # JSON columns itself, so a pre-serialized string would be double-encoded.
+    assert rows[0]["data"] == {"plan": "pro", "seats": 3}
+    assert rows[1]["data"] is None
+
+    final = [o for o in ops if o[0] == "checkpoint"][-1][1]
+    assert final == {"custom_events_cursor": "cur-1"}
+
+    # Resume: the stored cursor goes out alone.
+    seen_bodies.clear()
+    list(connector.update({**CONFIG, "tables": "custom_events"}, final))
+    assert seen_bodies == [{"limit": connector.PAGE_LIMIT, "cursor": "cur-1"}]
+
+
 def test_update_flattens_fields_splits_sfdc_and_paginates(patch_requests):
     # Contacts arrive across three pages. Page 2 is SHORT (one row, as if a
     # StarRocks id was missing from Spanner) yet still returns a `nextCursor`,
