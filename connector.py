@@ -84,10 +84,25 @@ EMAIL_STREAMS = [
     ("email_topic_unsubscribe", "EMAIL_TOPIC_UNSUBSCRIBE"),
 ]
 
-# Fixed floor for the custom_events walk. Sent only on the very first request
-# (before any cursor exists); afterwards the cursor carries the range. The
-# server bounds each internal query, so a long range is safe.
+# Default floor for the custom_events walk, overridable with the
+# `custom_events_start` configuration value (RFC-3339 UTC). Sent only on the
+# very first request (before any cursor exists); afterwards the cursor carries
+# the range, so changing it later has no effect until the connector is resynced.
+# The server bounds each internal query, so a long range is safe.
 CUSTOM_EVENTS_START = "2020-01-01T00:00:00Z"
+_RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
+
+
+def _resolve_custom_events_start(configuration: dict) -> str:
+    """Return the first-sync floor for custom_events, validating the format."""
+    raw = (configuration.get("custom_events_start") or CUSTOM_EVENTS_START).strip()
+    if not _RFC3339_UTC_RE.match(raw):
+        raise ValueError(
+            "configuration 'custom_events_start' must be an RFC-3339 UTC timestamp "
+            f"like 2024-01-01T00:00:00Z, got '{raw}'"
+        )
+    return raw
+
 
 # Table groups accepted in the `tables` configuration value. Individual table
 # names are also accepted.
@@ -141,6 +156,8 @@ def schema(configuration: dict) -> list[dict]:
     """
     _require_config(configuration)
     enabled = _resolve_tables(configuration)
+    # Validate up front so a bad value fails at schema time, before any sync.
+    _resolve_custom_events_start(configuration)
 
     tables: list[dict] = (
         [
@@ -262,7 +279,7 @@ def update(configuration: dict, state: dict) -> Iterable[Any]:
             state=state,
             state_key="custom_events_cursor",
             row_mapper=_map_custom_event,
-            first_page_extra={"occurredAt": {"start": CUSTOM_EVENTS_START}},
+            first_page_extra={"occurredAt": {"start": _resolve_custom_events_start(configuration)}},
         )
 
     log.info("Conversion connector: sync complete")

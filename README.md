@@ -129,7 +129,7 @@ returned and sends it back.
 
 Every request posts `{"limit": 1000, "cursor": <saved cursor>}` (the email
 tables also send `eventType`). `custom_events` is a windowed export: its very
-first request sends `{"occurredAt": {"start": "2020-01-01T00:00:00Z"}}` instead
+first request sends `{"occurredAt": {"start": <custom_events_start>}}` instead
 of a cursor, and every later request sends only the cursor. No `end` is sent, so
 the server re-resolves "now" on each request and the stored cursor keeps
 advancing into new events on every sync. The response envelope is
@@ -154,13 +154,19 @@ cp configuration.example.json configuration.json
 # {
 #   "base_url": "https://pub-api.conversion.ai/api",
 #   "api_key": "sk_live_<id>_<secret>",
-#   "tables": "contacts,email"        # optional; see Table selection
+#   "tables": "contacts,email",                    # optional; see Table selection
+#   "custom_events_start": "2020-01-01T00:00:00Z"  # optional; first-sync floor for custom_events
 # }
 ```
 
 All values are strings (a Fivetran Connector SDK requirement). After deploy the
 same values are editable in the connection's setup form in the Fivetran
 dashboard.
+
+`custom_events_start` (RFC-3339 UTC, default `2020-01-01T00:00:00Z`) is the
+earliest `occurred_at` the first `custom_events` sync backfills. It is only
+read when no cursor exists yet, so changing it on an existing connection has no
+effect until you resync the connector.
 
 ## Development
 

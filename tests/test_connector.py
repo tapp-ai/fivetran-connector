@@ -188,6 +188,27 @@ def test_update_custom_events_only_sends_range_once_and_skips_other_tables(patch
     assert seen_bodies == [{"limit": connector.PAGE_LIMIT, "cursor": "cur-1"}]
 
 
+def test_custom_events_start_config(patch_requests):
+    # A configured start replaces the default on the first request only.
+    seen_bodies: list[dict] = []
+
+    def handler(url, body):
+        seen_bodies.append(body)
+        return _FakeResp(_envelope({"events": []}, None))
+
+    patch_requests(handler)
+    cfg = {**CONFIG, "tables": "custom_events", "custom_events_start": "2025-06-01T00:00:00Z"}
+    list(connector.update(cfg, {}))
+    assert seen_bodies == [
+        {"limit": connector.PAGE_LIMIT, "occurredAt": {"start": "2025-06-01T00:00:00Z"}}
+    ]
+
+    # Unset -> default; malformed -> fails at schema time, before any sync.
+    assert connector._resolve_custom_events_start(CONFIG) == connector.CUSTOM_EVENTS_START
+    with pytest.raises(ValueError, match="custom_events_start"):
+        connector.schema({**CONFIG, "custom_events_start": "2025-06-01"})
+
+
 def test_update_flattens_fields_splits_sfdc_and_paginates(patch_requests):
     # Contacts arrive across three pages. Page 2 is SHORT (one row, as if a
     # StarRocks id was missing from Spanner) yet still returns a `nextCursor`,
