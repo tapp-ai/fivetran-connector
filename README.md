@@ -2,9 +2,12 @@
 
 A [Fivetran Connector SDK](https://fivetran.com/docs/connector-sdk) connector
 that exports [Conversion](https://conversion.ai) data into a destination
-warehouse. Licensed under [Apache-2.0](LICENSE).
+warehouse. Customers run it in their own Fivetran account to sync their
+contacts, email events and custom events. Licensed under [Apache-2.0](LICENSE).
 
-Each email table requests a single `eventType` from `POST /v2/exports/email-events`; the destination table name is the lowercased event type.
+Each email table requests a single `eventType` from
+`POST /v2/exports/email-events`; the destination table name is the lowercased
+event type.
 
 Which tables sync is controlled by the `tables` configuration value (see
 [Table selection](#table-selection)). The **Group** column is the name to list
@@ -58,7 +61,7 @@ owns the key, so the connector never sends a business id.
 
 ## Contact columns
 
-Core columns are typed in `schema()`:
+Core columns are declared with fixed types:
 
 
 | Name                  | Data type      | Description                                                                                                                                                                         |
@@ -73,14 +76,15 @@ Core columns are typed in `schema()`:
 | `updated_at`          | `UTC_DATETIME` | When the contact was last updated.                                                                                                                                                  |
 
 
-Every field schema value is added as an extra column named by the field's
-key (its "common name"). These are left undeclared in `schema()` so Fivetran infers them automatically as the set of fields grows.
+Every contact field is added as an extra column named by the field's key (its
+"common name"). These columns are left undeclared so Fivetran infers them as
+the set of fields grows.
 
 ## Email event columns
 
-Every `email_`* table is declared in `schema()` with the same columns. The
-**Tables** column lists which tables actually populate each column (`all` =
-every `email_`* table): the shared columns are populated everywhere, while the
+Every `email_*` table is declared with the same columns. The **Tables** column
+lists which tables actually populate each column (`all` = every `email_*`
+table): the shared columns are populated everywhere, while the
 rest carry data only for the event types noted (e.g. `email_open` and
 `email_delivery` carry only the shared columns).
 
@@ -90,7 +94,7 @@ rest carry data only for the event types noted (e.g. `email_open` and
 | `event_id`      | `STRING`       | all                                 | Event primary key.                                                                                                                                                                                       |
 | `contact_id`    | `STRING`       | all                                 | The contact this event belongs to; joins `contacts.id`.                                                                                                                                                  |
 | `occurred_at`   | `UTC_DATETIME` | all                                 | When the event occurred.                                                                                                                                                                                 |
-| `event_type`    | `STRING`       | all                                 | The kind of event: `SEND`, `OPEN`, `CLICK`, `DELIVERED`, or `UNSUBSCRIBE`.                                                                                                                               |
+| `event_type`    | `STRING`       | all                                 | The event type, matching the table: `EMAIL_SEND`, `EMAIL_OPEN`, `EMAIL_CLICK`, and so on.                                                                                                                             |
 | `source_type`   | `STRING`       | all                                 | The kind of flow that sent the email: `WORKFLOW` or `BLAST`.                                                                                                                                             |
 | `source_id`     | `STRING`       | all                                 | Id of the sending flow: either the `WORKFLOW` id or `BLAST` id.                                                                                                                                          |
 | `email_id`      | `STRING`       | all                                 | Id of the email asset.                                                                                                                                                                                   |
@@ -99,8 +103,8 @@ rest carry data only for the event types noted (e.g. `email_open` and
 | `is_bot`        | `BOOLEAN`      | all                                 | Whether the engagement was bot-classified; filter in the warehouse as needed.                                                                                                                            |
 | `link`          | `STRING`       | `email_click`                       | The clicked URL in the email.                                                                                                                                                                            |
 | `topic_ids`     | `STRING`       | `email_topic_unsubscribe`           | Stringified array of topic ids the recipient unsubscribed from. Only populated if recipient unsubscribed from specific topics; if the user subscribed from all communication, no topic ids are returned. |
-| `bounce_type`   | `STRING`       | `email_bounce`, `email_soft_bounce` | Bounce classification `Permanent`, `Transient`, `Undetermined`)                                                                                                                                          |
-| `error_message` | `STRING`       | `email_bounce`, `email_soft_bounce` | SMTP diagnostic code (e.g. `smtp; 550 5.1.1 user unknown`)                                                                                                                                               |
+| `bounce_type`   | `STRING`       | `email_bounce`, `email_soft_bounce` | Bounce classification (`Permanent`, `Transient`, `Undetermined`).                                                                                                                                          |
+| `error_message` | `STRING`       | `email_bounce`, `email_soft_bounce` | SMTP diagnostic code (e.g. `smtp; 550 5.1.1 user unknown`).                                                                                                                                               |
 
 
 ## Custom event columns
@@ -124,8 +128,8 @@ rest carry data only for the event types noted (e.g. `email_open` and
 
 Each table keeps its own **opaque cursor** in connector `state`, keyed by table
 (`contacts_cursor`, `email_send_cursor`, `custom_events_cursor`, …). The
-connector never interprets the cursor; it just stores whatever the API last
-returned and sends it back.
+connector never interprets the cursor; it stores whatever the API last returned
+and sends it back.
 
 Every request posts `{"limit": 1000, "cursor": <saved cursor>}` (the email
 tables also send `eventType`). `custom_events` is a windowed export: its very
@@ -142,6 +146,9 @@ cursor advances and stops only when it is exhausted (`null`) or stops advancing.
 It checkpoints `state` after every page, so progress is durable and the next
 sync resumes from the stored cursor. Rows are upserted by primary key
 (`id` / `event_id`), so any row the API re-emits updates in place.
+
+Network errors, 5xx and 429 responses are retried with exponential backoff, up
+to four attempts. Other 4xx responses fail the sync immediately.
 
 ## Configuration
 
@@ -170,35 +177,46 @@ effect until you resync the connector.
 
 ## Development
 
-This project uses [uv](https://docs.astral.sh/uv/).
+This project uses [uv](https://docs.astral.sh/uv/). From this directory:
 
 ```bash
-uv sync --extra dev     # create the venv and install deps (incl. dev tools)
-uv run pytest           # run the tests
-uv run ruff check .     # lint
-uv run ruff format .    # format
+uv sync --extra dev          # create the venv and install deps (incl. dev tools)
+uv run pytest                # run the tests
+uv run ruff check .          # lint
+uv run ruff format --check . # check formatting
 ```
 
-The Fivetran runtime pre-installs `fivetran_connector_sdk` and `requests`, so
-the connector needs no extra runtime dependencies. Fivetran reads
-`pyproject.toml` at deploy time (it takes precedence over `requirements.txt`)
-and installs `[project].dependencies`, which is intentionally empty. The SDK,
-`requests`, and test/lint tooling live under the `dev` optional-dependencies
-extra so they are installed locally but never by Fivetran.
-
-## Run locally
+To sync against the real API into a local DuckDB warehouse, so you can inspect
+tables and confirm cursors advance:
 
 ```bash
-# Debug against the API (reads configuration.json): runs the sync against a
-# local DuckDB warehouse so you can inspect tables and confirm cursors advance:
 uv run fivetran debug --configuration configuration.json
 ```
+
+The Fivetran runtime pre-installs `fivetran_connector_sdk` and `requests`.
+Fivetran reads `pyproject.toml` at deploy time (it takes precedence over
+`requirements.txt`) and installs `[project].dependencies`, which is
+intentionally empty: declaring the pre-installed packages breaks the deploy. The
+SDK, `requests`, and test and lint tools live in the `dev` extra, so they are
+installed locally but never by Fivetran.
 
 ## Deploy
 
 ```bash
 uv run fivetran deploy --api-key <FIVETRAN_DEPLOY_KEY> --destination <DEST> --connection conversion
 ```
+
+## Maintaining
+
+This directory is developed in Conversion's monorepo and mirrored to the root
+of the public `tapp-ai/fivetran-connector` repo on every push to `main` that
+touches it, so everything here is public. The connector is not part of the
+monorepo's Bazel build or CI; `.github/workflows/ci.yml` runs the checks above
+in the public repo after the mirror.
+
+The connector reads the export responses of Conversion's public API field by
+field. When an export's shape changes, update the API and this connector in
+the same change, and keep this README in step with the connector.
 
 ## Contributing
 
