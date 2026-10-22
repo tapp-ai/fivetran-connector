@@ -39,6 +39,10 @@ class _Operations:
     def checkpoint(state):
         return ("checkpoint", dict(state))
 
+    @staticmethod
+    def truncate(table):
+        return ("truncate", table, None)
+
 
 _sdk.Connector = _Connector
 _sdk.Logging = _Logging
@@ -257,9 +261,14 @@ def test_update_flattens_fields_splits_sfdc_and_paginates(patch_requests):
         if url.endswith("/v2/exports/contacts"):
             data, next_cursor = contact_pages[cursor]
             return _FakeResp(_envelope(data, next_cursor))
-        if url.endswith("/v2/exports/email-events"):
-            et = body["eventType"]
+        if url.endswith("/v2/exports/contact-events"):
+            # The old email events cursor is handed over once, never as `cursor`.
+            assert cursor != "old-email-events-cursor"
             if cursor is None:
+                et = body["types"][0]
+                handoff = body.get("emailEventsCursor")
+                assert handoff == ("old-email-events-cursor" if et == "EMAIL_SEND" else None)
+                topic = et == "EMAIL_TOPIC_UNSUBSCRIBE"
                 return _FakeResp(
                     _envelope(
                         {
@@ -269,16 +278,19 @@ def test_update_flattens_fields_splits_sfdc_and_paginates(patch_requests):
                                     "contactId": "c1",
                                     "occurredAt": "2026-06-01T10:00:00Z",
                                     "eventType": et,
+                                    "parentType": "EMAIL",
                                     "sourceType": "BLAST",
                                     "sourceId": "blast1",
-                                    "emailId": "em1",
-                                    "emailName": "Welcome",
-                                    "sentEmailId": "se1",
-                                    "isBot": False,
-                                    "link": "http://x" if et == "EMAIL_CLICK" else None,
-                                    "topicIds": None,
-                                    "bounceType": None,
-                                    "errorMessage": None,
+                                    "email": {
+                                        "emailId": "em1",
+                                        "emailName": "Welcome",
+                                        "sentEmailId": "se1",
+                                        "isBot": False,
+                                        "link": "http://x" if et == "EMAIL_CLICK" else None,
+                                        "topicIds": ["t1", "t2"] if topic else None,
+                                        "bounceType": None,
+                                        "errorMessage": None,
+                                    },
                                 },
                             ]
                         },
@@ -290,7 +302,7 @@ def test_update_flattens_fields_splits_sfdc_and_paginates(patch_requests):
 
     patch_requests(handler)
 
-    ops = list(connector.update(CONFIG, {}))
+    ops = list(connector.update(CONFIG, {"email_send_cursor": "old-email-events-cursor"}))
     upserts = [o for o in ops if o[0] == "upsert"]
     checkpoints = [o for o in ops if o[0] == "checkpoint"]
 
@@ -312,12 +324,15 @@ def test_update_flattens_fields_splits_sfdc_and_paginates(patch_requests):
         assert rows[0]["source_type"] == "BLAST" and "source" not in rows[0]
     click = [o[2] for o in upserts if o[1] == "email_click"][0]
     assert click["link"] == "http://x"
+    topic = [o[2] for o in upserts if o[1] == "email_topic_unsubscribe"][0]
+    assert topic["topic_ids"] == '["t1","t2"]'
 
     # Cursors advanced and were checkpointed.
     final = checkpoints[-1][1]
     assert final["contacts_cursor"] == "ck-2"
     for table, et in connector.EMAIL_STREAMS:
-        assert final[f"{table}_cursor"] == f"ck-{et}-1"
+        assert final[f"{table}_contact_events_cursor"] == f"ck-{et}-1"
+    assert "email_send_cursor" not in final
 
 
 def test_timestamps_truncated_to_microseconds():
@@ -363,3 +378,218 @@ def test_post_retries_transient_failure(patch_requests, monkeypatch):
     # `_post` returns the full envelope; callers read rows from `data` and the
     # next cursor from `pagination.nextCursor`.
     assert payload == _envelope({"contacts": []}, None)
+
+
+def test_contact_events_group_declares_one_table_per_family():
+    cfg = {**CONFIG, "tables": "contact_events"}
+    tables = {t["table"]: t for t in connector.schema(cfg)}
+    assert list(tables) == [table for table, _, _, _ in connector.CONTACT_EVENT_STREAMS]
+    assert all(t["primary_key"] == ["event_id"] for t in tables.values())
+    assert tables["page_visits"]["columns"]["utm_extra"] == "JSON"
+    assert "ip_address" not in tables["page_visits"]["columns"]
+    assert tables["campaign_member_events"]["columns"]["is_success"] == "BOOLEAN"
+
+
+def test_update_contact_events_filters_by_family_and_flattens(patch_requests):
+    seen_bodies: list[dict] = []
+
+    def handler(url, body):
+        assert url.endswith("/v2/exports/contact-events"), url
+        seen_bodies.append(body)
+        if body.get("cursor") == "wf-1":
+            return _FakeResp(_envelope({"events": []}, None))
+        event = {
+            "eventId": "e1",
+            "contactId": "c1",
+            "eventType": "WORKFLOW_ENTERED",
+            "parentType": "WORKFLOW",
+            "occurredAt": "2026-06-01T10:00:00.123456789Z",
+            "createdAt": "2026-06-01T10:00:01Z",
+            "sourceType": None,
+            "sourceId": None,
+            "workflow": {"workflowId": "w1", "workflowRunId": "r1", "workflowNodeId": "n1"},
+        }
+        return _FakeResp(_envelope({"events": [event]}, "wf-1"))
+
+    patch_requests(handler)
+    cfg = {**CONFIG, "tables": "workflow_events", "contact_events_start": "2025-01-01T00:00:00Z"}
+    ops = list(connector.update(cfg, {}))
+
+    assert seen_bodies[0] == {
+        "limit": connector.PAGE_LIMIT,
+        "parentTypes": ["WORKFLOW"],
+        "occurredAt": {"start": "2025-01-01T00:00:00Z"},
+    }
+    assert seen_bodies[1] == {"limit": connector.PAGE_LIMIT, "cursor": "wf-1"}
+
+    rows = [o for o in ops if o[0] == "upsert"]
+    assert [o[1] for o in rows] == ["workflow_events"]
+    row = rows[0][2]
+    assert row["event_type"] == "WORKFLOW_ENTERED"
+    assert row["workflow_id"] == "w1" and row["workflow_run_id"] == "r1"
+    assert row["occurred_at"] == "2026-06-01T10:00:00.123456Z"
+    assert [o for o in ops if o[0] == "checkpoint"][-1][1] == {"workflow_events_cursor": "wf-1"}
+
+
+def test_assets_are_truncated_and_reread_every_sync(patch_requests):
+    seen: list[tuple[str, dict]] = []
+    pages = {
+        "/v2/exports/campaign-types": {
+            None: (
+                {
+                    "campaignTypes": [
+                        {
+                            "id": "t1",
+                            "name": "Webinar",
+                            "category": "WEBINAR",
+                            "archived": False,
+                            "statuses": [
+                                {"id": "s1", "name": "Registered", "position": 0},
+                                {"id": "s2", "name": "Attended", "position": 1, "isSuccess": True},
+                            ],
+                        }
+                    ]
+                },
+                "ct-1",
+            ),
+            "ct-1": ({"campaignTypes": []}, None),
+        },
+        "/v2/exports/audience-members": {
+            None: ({"members": [{"audienceId": "a1", "contactId": "c1"}]}, None),
+        },
+    }
+
+    def handler(url, body):
+        path = url.removeprefix(CONFIG["base_url"])
+        seen.append((path, body))
+        data, next_cursor = pages[path][body.get("cursor")]
+        return _FakeResp(_envelope(data, next_cursor))
+
+    patch_requests(handler)
+    cfg = {**CONFIG, "tables": "campaign_types,campaign_type_statuses,audience_members"}
+    ops = list(connector.update(cfg, {}))
+
+    # Each table is truncated before its walk, and nothing else is called.
+    assert [o[1] for o in ops if o[0] == "truncate"] == [
+        "campaign_types",
+        "campaign_type_statuses",
+        "audience_members",
+    ]
+    assert [p for p, _ in seen] == [
+        "/v2/exports/campaign-types",
+        "/v2/exports/campaign-types",
+        "/v2/exports/audience-members",
+    ]
+    upserts = [(o[1], o[2]) for o in ops if o[0] == "upsert"]
+    assert upserts[0] == (
+        "campaign_types",
+        {
+            "id": "t1",
+            "name": "Webinar",
+            "description": None,
+            "category": "WEBINAR",
+            "archived": False,
+            "created_at": None,
+            "updated_at": None,
+        },
+    )
+    statuses = [row for table, row in upserts if table == "campaign_type_statuses"]
+    assert [(r["id"], r["campaign_type_id"], r["position"]) for r in statuses] == [
+        ("s1", "t1", 0),
+        ("s2", "t1", 1),
+    ]
+    assert statuses[1]["is_success"] is True
+    assert (
+        "audience_members",
+        {"audience_id": "a1", "contact_id": "c1", "created_at": None, "updated_at": None},
+    ) in upserts
+
+    # No asset cursor is kept, so the next sync starts from the beginning again.
+    final = [o for o in ops if o[0] == "checkpoint"][-1][1]
+    assert final == {}
+    seen.clear()
+    list(connector.update(cfg, final))
+    assert all(
+        "cursor" not in body for path, body in seen if path == "/v2/exports/audience-members"
+    )
+    assert seen[0] == ("/v2/exports/campaign-types", {"limit": connector.PAGE_LIMIT})
+
+
+def test_asset_table_selection_skips_unlisted_tables(patch_requests):
+    def handler(url, body):
+        assert url.endswith("/v2/exports/campaign-types"), url
+        return _FakeResp(
+            _envelope({"campaignTypes": [{"id": "t1", "statuses": [{"id": "s1"}]}]}, None)
+        )
+
+    patch_requests(handler)
+    ops = list(connector.update({**CONFIG, "tables": "campaign_type_statuses"}, {}))
+    assert [o[1] for o in ops if o[0] == "truncate"] == ["campaign_type_statuses"]
+    assert [(o[1], o[2]["id"], o[2]["campaign_type_id"]) for o in ops if o[0] == "upsert"] == [
+        ("campaign_type_statuses", "s1", "t1")
+    ]
+
+
+def test_touchpoints_walk_from_the_configured_start(patch_requests):
+    seen_bodies: list[dict] = []
+
+    def handler(url, body):
+        assert url.endswith("/v2/exports/touchpoints"), url
+        seen_bodies.append(body)
+        if body.get("cursor") == "tp-1":
+            return _FakeResp(_envelope({"touchpoints": []}, "tp-1"))
+        touchpoint = {
+            "touchpointId": "ws:c1:s1",
+            "contactId": "c1",
+            "touchType": "WEB_SESSION",
+            "occurredAt": "2026-06-01T10:00:00.123456789Z",
+            "landingPageUrl": "https://example.com/pricing",
+            "keyword": "crm software",
+            "utmMedium": "cpc",
+            "adProvider": "GOOGLE",
+            "channelId": "ch1",
+        }
+        return _FakeResp(_envelope({"touchpoints": [touchpoint]}, "tp-1"))
+
+    patch_requests(handler)
+    cfg = {**CONFIG, "tables": "attribution", "touchpoints_start": "2025-01-01T00:00:00Z"}
+    assert [t["table"] for t in connector.schema(cfg)] == ["touchpoints"]
+    ops = list(connector.update(cfg, {}))
+
+    assert seen_bodies[0] == {
+        "limit": connector.PAGE_LIMIT,
+        "occurredAt": {"start": "2025-01-01T00:00:00Z"},
+    }
+    # The server hands the same cursor back once caught up, which ends the walk.
+    assert seen_bodies[1] == {"limit": connector.PAGE_LIMIT, "cursor": "tp-1"}
+    assert len(seen_bodies) == 2
+
+    row = [o[2] for o in ops if o[0] == "upsert"][0]
+    assert row["touchpoint_id"] == "ws:c1:s1" and row["touch_type"] == "WEB_SESSION"
+    assert row["landing_page_url"] == "https://example.com/pricing"
+    assert row["keyword"] == "crm software" and row["utm_medium"] == "cpc"
+    assert row["ad_provider"] == "GOOGLE" and row["channel_id"] == "ch1"
+    assert row["occurred_at"] == "2026-06-01T10:00:00.123456Z"
+    assert row["session_id"] is None
+    assert [o for o in ops if o[0] == "checkpoint"][-1][1] == {"touchpoints_cursor": "tp-1"}
+
+
+def test_email_handoff_keeps_old_cursor_until_the_new_walk_has_one(patch_requests):
+    # Nothing new since the old cursor: no next cursor comes back, so the old
+    # cursor stays and is handed over again on the next sync.
+    sent = []
+
+    def handler(url, body):
+        assert url.endswith("/v2/exports/contact-events")
+        sent.append(body)
+        return _FakeResp(_envelope({"events": []}, None))
+
+    patch_requests(handler)
+    config = {**CONFIG, "tables": "email_send"}
+    state = {"email_send_cursor": "old"}
+    ops = list(connector.update(config, state))
+
+    first = {"limit": connector.PAGE_LIMIT, "types": ["EMAIL_SEND"], "emailEventsCursor": "old"}
+    assert sent == [first]
+    final = [o for o in ops if o[0] == "checkpoint"][-1][1]
+    assert final == {"email_send_cursor": "old"}

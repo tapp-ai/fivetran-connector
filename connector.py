@@ -1,7 +1,6 @@
 r"""Fivetran Connector SDK connector for Conversion.
 
-Exports up to eleven tables from the Conversion public API into a destination
-warehouse:
+Exports tables from the Conversion public API into a destination warehouse:
 
   - contacts   one row per contact, with every contact field
                flattened in as a column keyed by its common name (e.g. owner_id,
@@ -9,10 +8,18 @@ warehouse:
   - nine per-event email tables (email_send, email_delivery, email_open,
     email_click, email_bounce, email_soft_bounce, email_complaint,
     email_unsubscribe_all, email_topic_unsubscribe), each one row per email
-    engagement event of a single EMAIL_* type.
-    See EMAIL_STREAMS for the table -> eventType mapping.
+    engagement event of a single EMAIL_* type, read from the contact events
+    export. See EMAIL_STREAMS for the table -> event type mapping.
   - custom_events  one row per custom (behavioral) event recorded against a
                contact. Opt-in: see "Table selection" below.
+  - seven contact event tables, one per event family (page_visits,
+    form_submissions, campaign_member_events, workflow_events, audience_events,
+    field_changes, lead_conversions). Opt-in. See CONTACT_EVENT_STREAMS.
+  - asset tables (campaigns, campaign_types, campaign_type_statuses, workflows,
+    audiences, audience_members). Opt-in. Each sync re-reads them in full; see
+    ASSET_STREAMS.
+  - touchpoints  one row per Mosaic touchpoint. Opt-in, and the business needs
+               Mosaic enabled.
 
 All data is read from the public API using an API key (X-API-Key). The API
 scopes every request to the business that owns the key, so no business id is
@@ -38,18 +45,29 @@ the cursor. We send a fixed early start with no end, so the server re-resolves
 ``now()`` on every request and the stored cursor keeps advancing into new events
 across syncs exactly like the other tables.
 
+The contact event tables and ``touchpoints`` walk the same way: each sends its event family and
+``occurredAt.start`` on the first request only, then just the cursor.
+
+Asset tables are snapshots rather than streams. Every sync marks the table's
+existing rows deleted (``truncate``), then pages from no cursor to the end and
+upserts what the API returns, so deleted assets and removed audience members
+drop out. No asset cursor is kept in state.
+
 Table selection
 ---------------
 The optional ``tables`` configuration value is a comma-separated list of table
-names and/or groups (``contacts``, ``email``, ``custom_events``; ``email``
-expands to every ``email_*`` table). Unlisted tables are neither declared in the
-schema nor synced. When ``tables`` is unset the connector syncs ``contacts`` and
-``email`` — exactly what it synced before this option existed — so existing
-connections are unaffected by a redeploy.
+names and/or groups (``contacts``, ``email``, ``custom_events``,
+``contact_events``, ``assets``, ``attribution``; ``email`` expands to every
+``email_*`` table).
+Unlisted tables are neither declared in the schema nor synced. When ``tables``
+is unset the connector syncs ``contacts`` and ``email`` — exactly what it synced
+before this option existed — so existing connections are unaffected by a
+redeploy.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable, Iterable
@@ -68,10 +86,9 @@ MAX_RETRIES = 4
 BACKOFF_BASE_SECONDS = 2
 REQUEST_TIMEOUT_SECONDS = 60
 
-# The per-event email tables and the EMAIL_* eventType each one requests. The
-# destination table name is the lowercased event type. eventType is matched 1:1
-# against the underlying email event type; see the Conversion export API docs
-# for the full set of exportable types.
+# The per-event email tables and the EMAIL_* contact event type each one
+# requests from the contact events export. The destination table name is the
+# lowercased event type.
 EMAIL_STREAMS = [
     ("email_send", "EMAIL_SEND"),
     ("email_delivery", "EMAIL_DELIVERY"),
@@ -93,15 +110,220 @@ CUSTOM_EVENTS_START = "2020-01-01T00:00:00Z"
 _RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
 
 
-def _resolve_custom_events_start(configuration: dict) -> str:
-    """Return the first-sync floor for custom_events, validating the format."""
-    raw = (configuration.get("custom_events_start") or CUSTOM_EVENTS_START).strip()
+def _resolve_start(configuration: dict, key: str) -> str:
+    """Return a first-sync floor from ``configuration[key]``, validating the format."""
+    raw = (configuration.get(key) or CUSTOM_EVENTS_START).strip()
     if not _RFC3339_UTC_RE.match(raw):
         raise ValueError(
-            "configuration 'custom_events_start' must be an RFC-3339 UTC timestamp "
+            f"configuration '{key}' must be an RFC-3339 UTC timestamp "
             f"like 2024-01-01T00:00:00Z, got '{raw}'"
         )
     return raw
+
+
+def _resolve_custom_events_start(configuration: dict) -> str:
+    """Return the first-sync floor for custom_events."""
+    return _resolve_start(configuration, "custom_events_start")
+
+
+def _resolve_contact_events_start(configuration: dict) -> str:
+    """Return the first-sync floor for the contact event tables."""
+    return _resolve_start(configuration, "contact_events_start")
+
+
+def _resolve_touchpoints_start(configuration: dict) -> str:
+    """Return the first-sync floor for touchpoints."""
+    return _resolve_start(configuration, "touchpoints_start")
+
+
+# Mosaic touchpoint columns, read from each exported touchpoint.
+TOUCHPOINT_COLUMNS: dict[str, str] = {
+    "touchpoint_id": "STRING",
+    "contact_id": "STRING",
+    "touch_type": "STRING",
+    "occurred_at": "UTC_DATETIME",
+    "session_id": "STRING",
+    "form_id": "STRING",
+    "landing_page_url": "STRING",
+    "referrer": "STRING",
+    "keyword": "STRING",
+    "utm_source": "STRING",
+    "utm_medium": "STRING",
+    "utm_campaign": "STRING",
+    "utm_term": "STRING",
+    "utm_content": "STRING",
+    "ad_id": "STRING",
+    "ad_group_id": "STRING",
+    "ad_campaign_id": "STRING",
+    "ad_account_id": "STRING",
+    "ad_provider": "STRING",
+    "campaign_id": "STRING",
+    "channel_id": "STRING",
+    "subchannel_id": "STRING",
+}
+
+
+# Columns shared by every contact event table, read from the event's top level.
+CONTACT_EVENT_COLUMNS: dict[str, str] = {
+    "event_id": "STRING",
+    "contact_id": "STRING",
+    "event_type": "STRING",
+    "occurred_at": "UTC_DATETIME",
+    "created_at": "UTC_DATETIME",
+    "source_type": "STRING",
+    "source_id": "STRING",
+}
+
+# Session and attribution columns on page visits and form submissions.
+WEB_COLUMNS: dict[str, str] = {
+    "session_id": "STRING",
+    "tracking_id": "STRING",
+    "referrer": "STRING",
+    "utm_source": "STRING",
+    "utm_medium": "STRING",
+    "utm_campaign": "STRING",
+    "utm_term": "STRING",
+    "utm_content": "STRING",
+    "utm_extra": "JSON",
+    "landing_page_id": "STRING",
+    "landing_page_route_id": "STRING",
+    "landing_page_version_id": "STRING",
+    "ad_id": "STRING",
+    "ad_group_id": "STRING",
+    "ad_campaign_id": "STRING",
+    "ad_account_id": "STRING",
+    "ad_keyword": "STRING",
+}
+
+# (table, parentType sent on the first request, family object key in each
+# event, family columns). Family columns are read from that object.
+CONTACT_EVENT_STREAMS: list[tuple[str, str, str, dict[str, str]]] = [
+    (
+        "page_visits",
+        "PAGE_VISIT",
+        "pageVisit",
+        {
+            "page_url": "STRING",
+            "page_visit_type": "STRING",
+            "sent_email_id": "STRING",
+            **WEB_COLUMNS,
+        },
+    ),
+    (
+        "form_submissions",
+        "FORM_SUBMISSION",
+        "formSubmission",
+        {"form_id": "STRING", "page_url": "STRING", "fields": "JSON", **WEB_COLUMNS},
+    ),
+    (
+        "campaign_member_events",
+        "CAMPAIGN_MEMBER",
+        "campaignMember",
+        {
+            "campaign_id": "STRING",
+            "campaign_member_id": "STRING",
+            "campaign_type_id": "STRING",
+            "campaign_category": "STRING",
+            "status_id": "STRING",
+            "old_status_id": "STRING",
+            "is_success": "BOOLEAN",
+            "old_is_success": "BOOLEAN",
+            "field_key": "STRING",
+            "old_value": "STRING",
+            "new_value": "STRING",
+        },
+    ),
+    (
+        "workflow_events",
+        "WORKFLOW",
+        "workflow",
+        {"workflow_id": "STRING", "workflow_run_id": "STRING", "workflow_node_id": "STRING"},
+    ),
+    ("audience_events", "AUDIENCE", "audience", {"audience_id": "STRING"}),
+    (
+        "field_changes",
+        "FIELD_CHANGE",
+        "fieldChange",
+        {"field_key": "STRING", "old_value": "STRING", "new_value": "STRING"},
+    ),
+    (
+        "lead_conversions",
+        "SFDC_LEAD_CONVERTED",
+        "leadConversion",
+        {"old_salesforce_lead_id": "STRING", "new_salesforce_contact_id": "STRING"},
+    ),
+]
+
+_ASSET_TIMESTAMPS = {"created_at": "UTC_DATETIME", "updated_at": "UTC_DATETIME"}
+
+# Asset snapshot tables: table -> (primary key, columns). campaign_type_statuses
+# is filled from the statuses nested in each campaign type.
+ASSET_TABLES: dict[str, tuple[list[str], dict[str, str]]] = {
+    "campaigns": (
+        ["id"],
+        {
+            "id": "STRING",
+            "name": "STRING",
+            "description": "STRING",
+            "category": "STRING",
+            "campaign_type_id": "STRING",
+            "archived": "BOOLEAN",
+            "salesforce_campaign_id": "STRING",
+            **_ASSET_TIMESTAMPS,
+        },
+    ),
+    "campaign_types": (
+        ["id"],
+        {
+            "id": "STRING",
+            "name": "STRING",
+            "description": "STRING",
+            "category": "STRING",
+            "archived": "BOOLEAN",
+            **_ASSET_TIMESTAMPS,
+        },
+    ),
+    "campaign_type_statuses": (
+        ["id"],
+        {
+            "id": "STRING",
+            "campaign_type_id": "STRING",
+            "name": "STRING",
+            "position": "INT",
+            "is_success": "BOOLEAN",
+            "hidden": "BOOLEAN",
+            "parent_status_id": "STRING",
+            **_ASSET_TIMESTAMPS,
+        },
+    ),
+    "workflows": (
+        ["id"],
+        {
+            "id": "STRING",
+            "name": "STRING",
+            "status": "STRING",
+            "activated_at": "UTC_DATETIME",
+            **_ASSET_TIMESTAMPS,
+        },
+    ),
+    "audiences": (
+        ["id"],
+        {"id": "STRING", "name": "STRING", "type": "STRING", **_ASSET_TIMESTAMPS},
+    ),
+    "audience_members": (
+        ["audience_id", "contact_id"],
+        {"audience_id": "STRING", "contact_id": "STRING", **_ASSET_TIMESTAMPS},
+    ),
+}
+
+# (tables written, endpoint, rows key). campaign-types fills two tables.
+ASSET_STREAMS: list[tuple[list[str], str, str]] = [
+    (["campaigns"], "/v2/exports/campaigns", "campaigns"),
+    (["campaign_types", "campaign_type_statuses"], "/v2/exports/campaign-types", "campaignTypes"),
+    (["workflows"], "/v2/exports/workflows", "workflows"),
+    (["audiences"], "/v2/exports/audiences", "audiences"),
+    (["audience_members"], "/v2/exports/audience-members", "members"),
+]
 
 
 # Table groups accepted in the `tables` configuration value. Individual table
@@ -110,6 +332,9 @@ TABLE_GROUPS: dict[str, list[str]] = {
     "contacts": ["contacts"],
     "email": [table for table, _ in EMAIL_STREAMS],
     "custom_events": ["custom_events"],
+    "contact_events": [table for table, _, _, _ in CONTACT_EVENT_STREAMS],
+    "assets": list(ASSET_TABLES),
+    "attribution": ["touchpoints"],
 }
 ALL_TABLES: list[str] = [t for group in TABLE_GROUPS.values() for t in group]
 
@@ -158,6 +383,8 @@ def schema(configuration: dict) -> list[dict]:
     enabled = _resolve_tables(configuration)
     # Validate up front so a bad value fails at schema time, before any sync.
     _resolve_custom_events_start(configuration)
+    _resolve_contact_events_start(configuration)
+    _resolve_touchpoints_start(configuration)
 
     tables: list[dict] = (
         [
@@ -218,6 +445,25 @@ def schema(configuration: dict) -> list[dict]:
                 },
             },
         ]
+        + [
+            {
+                "table": table,
+                "primary_key": ["event_id"],
+                "columns": {**CONTACT_EVENT_COLUMNS, **family_columns},
+            }
+            for table, _parent_type, _family_key, family_columns in CONTACT_EVENT_STREAMS
+        ]
+        + [
+            {"table": table, "primary_key": primary_key, "columns": columns}
+            for table, (primary_key, columns) in ASSET_TABLES.items()
+        ]
+        + [
+            {
+                "table": "touchpoints",
+                "primary_key": ["touchpoint_id"],
+                "columns": TOUCHPOINT_COLUMNS,
+            }
+        ]
     )
     return [t for t in tables if t["table"] in enabled]
 
@@ -250,20 +496,34 @@ def update(configuration: dict, state: dict) -> Iterable[Any]:
         )
 
     # Email events -----------------------------------------------------------
+    # Read from the contact events export, one type per table. Its cursors wrap
+    # their filters, so they live under a new state key. A table upgraded from
+    # the deprecated email events export hands its old `<table>_cursor` over
+    # once as emailEventsCursor, and the walk resumes where it stopped instead
+    # of re-reading all history. The old key is dropped only once the new walk
+    # has a cursor of its own, so a failed first page retries the handoff.
     for table, event_type in EMAIL_STREAMS:
         if table not in enabled:
             continue
+        legacy_key = f"{table}_cursor"
+        state_key = f"{table}_contact_events_cursor"
+        first_page: dict[str, Any] = {"types": [event_type]}
+        if state.get(legacy_key) and not state.get(state_key):
+            first_page["emailEventsCursor"] = state[legacy_key]
         yield from _sync_stream(
             base_url=base_url,
             api_key=api_key,
             table=table,
-            path="/v2/exports/email-events",
-            body_extra={"eventType": event_type},
+            path="/v2/exports/contact-events",
+            body_extra={},
             rows_key="events",
             state=state,
-            state_key=f"{table}_cursor",
+            state_key=state_key,
             row_mapper=_map_email_event,
+            first_page_extra=first_page,
         )
+        if state.get(state_key):
+            state.pop(legacy_key, None)
 
     # Custom events ----------------------------------------------------------
     # Windowed endpoint: occurredAt goes on the first request only; the cursor
@@ -281,6 +541,50 @@ def update(configuration: dict, state: dict) -> Iterable[Any]:
             row_mapper=_map_custom_event,
             first_page_extra={"occurredAt": {"start": _resolve_custom_events_start(configuration)}},
         )
+
+    # Contact events ---------------------------------------------------------
+    # One table per event family; the family and occurredAt.start go on the
+    # first request only, after which the cursor carries them.
+    for table, parent_type, family_key, family_columns in CONTACT_EVENT_STREAMS:
+        if table not in enabled:
+            continue
+        yield from _sync_stream(
+            base_url=base_url,
+            api_key=api_key,
+            table=table,
+            path="/v2/exports/contact-events",
+            body_extra={},
+            rows_key="events",
+            state=state,
+            state_key=f"{table}_cursor",
+            row_mapper=_contact_event_mapper(family_key, family_columns),
+            first_page_extra={
+                "parentTypes": [parent_type],
+                "occurredAt": {"start": _resolve_contact_events_start(configuration)},
+            },
+        )
+
+    # Touchpoints ------------------------------------------------------------
+    # Windowed like custom_events; the server holds the walk a day short of now
+    # so sessions settle before their touchpoints export.
+    if "touchpoints" in enabled:
+        yield from _sync_stream(
+            base_url=base_url,
+            api_key=api_key,
+            table="touchpoints",
+            path="/v2/exports/touchpoints",
+            body_extra={},
+            rows_key="touchpoints",
+            state=state,
+            state_key="touchpoints_cursor",
+            row_mapper=lambda touchpoint: _pick(touchpoint, TOUCHPOINT_COLUMNS),
+            first_page_extra={"occurredAt": {"start": _resolve_touchpoints_start(configuration)}},
+        )
+
+    # Assets -----------------------------------------------------------------
+    for tables, path, rows_key in ASSET_STREAMS:
+        if any(table in enabled for table in tables):
+            yield from _sync_snapshot(base_url, api_key, tables, enabled, path, rows_key, state)
 
     log.info("Conversion connector: sync complete")
 
@@ -345,6 +649,48 @@ def _sync_stream(
     log.info(f"{table}: synced {row_count} rows across {page_count} page(s)")
 
 
+def _sync_snapshot(
+    base_url: str,
+    api_key: str,
+    tables: list[str],
+    enabled: set[str],
+    path: str,
+    rows_key: str,
+    state: dict,
+) -> Iterable[Any]:
+    """Re-read one asset export in full and replace its enabled tables' rows.
+
+    ``tables[0]`` is the export's own table; the rest are filled from it. The
+    enabled tables are truncated first (a soft delete), so anything the API no
+    longer returns stays marked deleted once the walk finishes. Assets are small,
+    so each sync walks from no cursor to the end; no cursor goes into state.
+    """
+    counts = {table: 0 for table in tables if table in enabled}
+    for table in counts:
+        yield op.truncate(table)
+
+    cursor: str | None = None
+    while True:
+        body: dict[str, Any] = {"limit": PAGE_LIMIT}
+        if cursor:
+            body["cursor"] = cursor
+        payload = _post(base_url, api_key, path, body)
+        for raw in (payload.get("data") or {}).get(rows_key) or []:
+            for table, row in _map_asset(tables[0], raw):
+                if table in counts:
+                    counts[table] += 1
+                    yield op.upsert(table=table, data=row)
+        yield op.checkpoint(state)
+
+        next_cursor = (payload.get("pagination") or {}).get("nextCursor")
+        if not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+
+    for table, count in counts.items():
+        log.info(f"{table}: synced {count} rows")
+
+
 # --------------------------------------------------------------------------- #
 #                                Row mappers                                   #
 # --------------------------------------------------------------------------- #
@@ -389,7 +735,12 @@ def _map_contact(contact: dict) -> dict:
 
 
 def _map_email_event(event: dict) -> dict:
-    """Map one email event onto its warehouse row."""
+    """Map one EMAIL contact event onto its email table row.
+
+    ``topic_ids`` stays a compact JSON array string, the column's original shape.
+    """
+    email = event.get("email") or {}
+    topic_ids = email.get("topicIds")
     return {
         "event_id": event.get("eventId"),
         "contact_id": event.get("contactId"),
@@ -397,14 +748,14 @@ def _map_email_event(event: dict) -> dict:
         "event_type": event.get("eventType"),
         "source_type": event.get("sourceType"),
         "source_id": event.get("sourceId"),
-        "email_id": event.get("emailId"),
-        "email_name": event.get("emailName"),
-        "sent_email_id": event.get("sentEmailId"),
-        "is_bot": event.get("isBot"),
-        "link": event.get("link"),
-        "topic_ids": event.get("topicIds"),
-        "bounce_type": event.get("bounceType"),
-        "error_message": event.get("errorMessage"),
+        "email_id": email.get("emailId"),
+        "email_name": email.get("emailName"),
+        "sent_email_id": email.get("sentEmailId"),
+        "is_bot": email.get("isBot"),
+        "link": email.get("link"),
+        "topic_ids": json.dumps(topic_ids, separators=(",", ":")) if topic_ids else None,
+        "bounce_type": email.get("bounceType"),
+        "error_message": email.get("errorMessage"),
     }
 
 
@@ -428,6 +779,49 @@ def _map_custom_event(event: dict) -> dict:
         "client_event_id": event.get("clientEventId"),
         "data": event.get("data"),
     }
+
+
+def _camel(column: str) -> str:
+    """Return the API's camelCase key for a snake_case column."""
+    head, *rest = column.split("_")
+    return head + "".join(part.capitalize() for part in rest)
+
+
+def _pick(source: dict, columns: dict[str, str]) -> dict:
+    """Read each column from ``source`` by its camelCase key."""
+    row: dict[str, Any] = {}
+    for column, column_type in columns.items():
+        value = source.get(_camel(column))
+        row[column] = _normalize_ts(value) if column_type == "UTC_DATETIME" else value
+    return row
+
+
+def _contact_event_mapper(
+    family_key: str, family_columns: dict[str, str]
+) -> Callable[[dict], dict]:
+    """Return a mapper that flattens one event family into its table's row."""
+
+    def _map(event: dict) -> dict:
+        row = _pick(event, CONTACT_EVENT_COLUMNS)
+        row.update(_pick(event.get(family_key) or {}, family_columns))
+        return row
+
+    return _map
+
+
+def _map_asset(table: str, raw: dict) -> list[tuple[str, dict]]:
+    """Map one exported asset onto ``(table, row)`` pairs.
+
+    A campaign type also yields one ``campaign_type_statuses`` row per status.
+    """
+    rows = [(table, _pick(raw, ASSET_TABLES[table][1]))]
+    if table == "campaign_types":
+        status_columns = ASSET_TABLES["campaign_type_statuses"][1]
+        for status in raw.get("statuses") or []:
+            row = _pick(status, status_columns)
+            row["campaign_type_id"] = raw.get("id")
+            rows.append(("campaign_type_statuses", row))
+    return rows
 
 
 # --------------------------------------------------------------------------- #
