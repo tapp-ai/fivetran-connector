@@ -265,12 +265,15 @@ v3 export lists live and deleted contacts in one `contacts` list, in the order
 to apply them, and the connector deletes a row with `deleted: true` instead of
 upserting it. A `contacts` walk with no
 stored cursor (the first sync, or a resync of the table) truncates the table
-first: the API replays every deletion it has recorded, but not those from
-before it started recording them. A restored
-contact comes back as an upsert. Each version keeps its own cursor
+first: the API replays every deletion it still keeps, but not older ones. A
+restored contact comes back as an upsert. Each version keeps its own cursor
 (`contacts_cursor`, `contacts_v3_cursor`). The v3 export accepts a v2 cursor, so
 switching a connection to v3 resumes its walk without a truncate, and switching
-back to v2 resumes the v2 cursor from where v3 took over.
+back to v2 resumes the v2 cursor from where v3 took over. The API keeps
+deletions for about six months: a stored v3 cursor whose deletions are more
+than 179 days old, or whose walk started more than 178 days before it reads
+any, gets `cursor_expired`, and the connector drops it and restarts the walk
+once, truncating the table on the restarted walk's first page.
 
 The contact event tables work like `custom_events`: each table's first request
 sends its family in `parentTypes` and `{"occurredAt": {"start": <contact_events_start>}}`,

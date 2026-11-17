@@ -401,6 +401,49 @@ def test_contacts_truncate_waits_for_the_first_page(patch_requests):
     assert [o for o in ops if o[0] == "truncate"] == []
 
 
+def test_contacts_expired_cursor_restarts_the_walk(patch_requests):
+    # The stored cursor expired: the connector drops it, empties the table on the
+    # restarted walk's first page, and stores the new walk's cursor.
+    def handler(url, body):
+        cursor = body.get("cursor")
+        if cursor == "c1.old":
+            return _FakeResp(
+                {"error": {"code": "cursor_expired", "message": "expired"}}, status_code=400
+            )
+        if cursor is None:
+            return _FakeResp(
+                _envelope({"contacts": [{"id": "c1", "deleted": False, "fields": {}}]}, "c1.new")
+            )
+        return _FakeResp(_envelope({"contacts": []}, None))
+
+    patch_requests(handler)
+    v3 = {**CONFIG, "tables": "contacts", "version": "v3"}
+    ops = list(connector.update(v3, {"contacts_v3_cursor": "c1.old"}))
+
+    assert [(o[0], (o[2] or {}).get("id")) for o in ops if o[0] != "checkpoint"] == [
+        ("truncate", None),
+        ("upsert", "c1"),
+    ]
+    assert [o for o in ops if o[0] == "checkpoint"][-1][1]["contacts_v3_cursor"] == "c1.new"
+
+    # An expired error without a stored cursor fails the sync instead of looping.
+    patch_requests(
+        lambda url, body: _FakeResp({"error": {"code": "cursor_expired"}}, status_code=400)
+    )
+    with pytest.raises(connector.CursorExpiredError):
+        list(connector.update(v3, {}))
+
+    # So does the restarted walk's own cursor expiring: the walk restarts once per sync.
+    def always_expired(url, body):
+        if body.get("cursor"):
+            return _FakeResp({"error": {"code": "cursor_expired"}}, status_code=400)
+        return _FakeResp(_envelope({"contacts": []}, "c1.fresh"))
+
+    patch_requests(always_expired)
+    with pytest.raises(connector.CursorExpiredError):
+        list(connector.update(v3, {"contacts_v3_cursor": "c1.old"}))
+
+
 def test_version_keeps_a_contacts_cursor_per_version(patch_requests):
     # v2 is the default and never deletes or truncates. v3 starts from the v2
     # cursor and keeps its own, so switching back to v2 resumes v2's cursor.

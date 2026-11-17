@@ -649,8 +649,8 @@ def _sync_stream(
     instead of upserted. Rows apply in page order, since the API lists an id's
     later state after its earlier one. With ``truncate_new_walk``, a walk with no
     stored cursor empties the table once its first page arrives: the API reports
-    only the deletions it has recorded, so rows left from before (such as after
-    a re-sync) would otherwise never be removed.
+    only the deletions it still keeps, so rows left from before (such as after a
+    re-sync) would otherwise never be removed.
 
     Paging is driven by the API's ``pagination.nextCursor``, NOT by page length —
     a short page is not end-of-stream. ListContactsV5 silently drops ids that are
@@ -664,6 +664,7 @@ def _sync_stream(
     row_count = 0
 
     truncate_pending = truncate_new_walk and not cursor
+    restarted = False
 
     while True:
         body: dict[str, Any] = {"limit": PAGE_LIMIT, **body_extra}
@@ -672,7 +673,19 @@ def _sync_stream(
         elif first_page_extra:
             body.update(first_page_extra)
 
-        payload = _post(base_url, api_key, path, body)
+        try:
+            payload = _post(base_url, api_key, path, body)
+        except CursorExpiredError:
+            # One restart per sync: a fresh walk's cursor expiring again is a server fault.
+            if not cursor or restarted:
+                raise
+            restarted = True
+            # The stored cursor outlived what the API keeps; the walk restarts as a new one.
+            log.warning(f"{table}: stored cursor expired; restarting the walk")
+            cursor = None
+            state.pop(state_key, None)
+            truncate_pending = truncate_new_walk
+            continue
         data = payload.get("data") or {}
         rows = data.get(rows_key) or []
 
@@ -881,6 +894,20 @@ def _map_asset(table: str, raw: dict) -> list[tuple[str, dict]]:
 # --------------------------------------------------------------------------- #
 #                                  HTTP                                        #
 # --------------------------------------------------------------------------- #
+class CursorExpiredError(RuntimeError):
+    """The API no longer keeps what a stored cursor needs, so its walk restarts."""
+
+
+def _error_code(resp: Any) -> str | None:
+    """Return the structured error code of a failed response, if it has one."""
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    return error.get("code") if isinstance(error, dict) else None
+
+
 def _post(base_url: str, api_key: str, path: str, body: dict) -> dict:
     """POST to the public API and return the full response envelope.
 
@@ -902,6 +929,8 @@ def _post(base_url: str, api_key: str, path: str, body: dict) -> dict:
             if resp.status_code >= 500 or resp.status_code == 429:
                 raise requests.HTTPError(f"{resp.status_code} from {path}: {resp.text[:500]}")
             if resp.status_code >= 400:
+                if _error_code(resp) == "cursor_expired":
+                    raise CursorExpiredError(f"{path}: cursor expired")
                 raise RuntimeError(f"{resp.status_code} from {path}: {resp.text[:500]}")
 
             payload = resp.json()
