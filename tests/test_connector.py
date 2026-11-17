@@ -43,6 +43,10 @@ class _Operations:
     def truncate(table):
         return ("truncate", table, None)
 
+    @staticmethod
+    def delete(table=None, keys=None):
+        return ("delete", table, keys)
+
 
 _sdk.Connector = _Connector
 _sdk.Logging = _Logging
@@ -333,6 +337,112 @@ def test_update_flattens_fields_splits_sfdc_and_paginates(patch_requests):
     for table, et in connector.EMAIL_STREAMS:
         assert final[f"{table}_contact_events_cursor"] == f"ck-{et}-1"
     assert "email_send_cursor" not in final
+
+
+def test_contacts_apply_rows_in_order_and_a_new_walk_truncates(patch_requests):
+    # A deleted row is deleted, not upserted, and rows apply in page order: c2 is
+    # live and then deleted on the same page. A walk with no stored cursor
+    # empties the table first.
+    pages = {
+        None: (
+            {
+                "contacts": [
+                    {"id": "c1", "deleted": False, "fields": {}},
+                    {"id": "c2", "deleted": False, "fields": {}},
+                    {"id": "c2", "deleted": True, "deletedAt": "2026-11-01T00:00:00Z"},
+                ],
+            },
+            "ck-1",
+        ),
+        "ck-1": (
+            {
+                "contacts": [
+                    {"id": "c0", "deleted": True, "deletedAt": "2026-11-01T00:00:00Z"},
+                    {"id": "c2", "deleted": False, "fields": {}},
+                ],
+            },
+            None,
+        ),
+    }
+
+    def handler(url, body):
+        assert url.endswith("/v3/exports/contacts")
+        data, next_cursor = pages[body.get("cursor")]
+        return _FakeResp(_envelope(data, next_cursor))
+
+    patch_requests(handler)
+    only_contacts = {**CONFIG, "tables": "contacts", "version": "v3"}
+
+    ops = [o for o in connector.update(only_contacts, {}) if o[0] != "checkpoint"]
+    assert [(o[0], (o[2] or {}).get("id")) for o in ops] == [
+        ("truncate", None),
+        ("upsert", "c1"),
+        ("upsert", "c2"),
+        ("delete", "c2"),
+        ("delete", "c0"),
+        ("upsert", "c2"),
+    ]
+    assert "deleted" not in ops[1][2]
+
+    # A stored cursor, including one from the v2 export, resumes without emptying the table.
+    ops = list(connector.update(only_contacts, {"contacts_cursor": "ck-1"}))
+    assert [o[0] for o in ops if o[0] != "checkpoint"] == ["delete", "upsert"]
+
+
+def test_contacts_truncate_waits_for_the_first_page(patch_requests):
+    # A failed first request leaves the table as it was.
+    patch_requests(
+        lambda url, body: _FakeResp({"error": {"code": "export_not_enabled"}}, status_code=403)
+    )
+    ops = []
+    with pytest.raises(RuntimeError):
+        for o in connector.update({**CONFIG, "tables": "contacts", "version": "v3"}, {}):
+            ops.append(o)
+    assert [o for o in ops if o[0] == "truncate"] == []
+
+
+def test_version_keeps_a_contacts_cursor_per_version(patch_requests):
+    # v2 is the default and never deletes or truncates. v3 starts from the v2
+    # cursor and keeps its own, so switching back to v2 resumes v2's cursor.
+    pages = {
+        ("/v2/exports/contacts", None): ([{"id": "c1", "fields": {}}], "v2-1"),
+        ("/v2/exports/contacts", "v2-1"): ([], None),
+        ("/v3/exports/contacts", "v2-1"): ([{"id": "c1", "deleted": True}], "c1.v3-1"),
+        ("/v3/exports/contacts", "c1.v3-1"): ([], None),
+    }
+    calls = []
+
+    def handler(url, body):
+        key = (url.removeprefix(CONFIG["base_url"]), body.get("cursor"))
+        calls.append(key)
+        rows, next_cursor = pages[key]
+        return _FakeResp(_envelope({"contacts": rows}, next_cursor))
+
+    patch_requests(handler)
+    v2 = {**CONFIG, "tables": "contacts"}
+    v3 = {**v2, "version": "v3"}
+
+    def sync(config, state):
+        ops = list(connector.update(config, state))
+        return [o[0] for o in ops if o[0] != "checkpoint"], [
+            o for o in ops if o[0] == "checkpoint"
+        ][-1][1]
+
+    done, state = sync(v2, {})
+    assert done == ["upsert"]
+    assert state == {"contacts_cursor": "v2-1"}
+
+    done, state = sync(v3, state)
+    assert done == ["delete"], "a v2 cursor resumes on v3 without a truncate"
+    assert state == {"contacts_cursor": "v2-1", "contacts_v3_cursor": "c1.v3-1"}
+
+    calls.clear()
+    done, state = sync(v2, state)
+    assert calls[0] == ("/v2/exports/contacts", "v2-1")
+    assert state["contacts_v3_cursor"] == "c1.v3-1", "switching back keeps the v3 cursor"
+
+    with pytest.raises(ValueError):
+        connector.schema({**CONFIG, "version": "v4"})
 
 
 def test_timestamps_truncated_to_microseconds():

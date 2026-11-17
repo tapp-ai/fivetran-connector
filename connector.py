@@ -136,6 +136,21 @@ def _resolve_touchpoints_start(configuration: dict) -> str:
     return _resolve_start(configuration, "touchpoints_start")
 
 
+# Which API version the connector reads, from the `version` configuration
+# value. Only `contacts` differs: v2 lists live contacts only; v3 also lists
+# deleted contacts. v2 stays the default while v3 rolls out one connection at a
+# time.
+VERSIONS = ("v2", "v3")
+
+
+def _resolve_version(configuration: dict) -> str:
+    """Return the API version, validating it."""
+    raw = (configuration.get("version") or "v2").strip().lower()
+    if raw not in VERSIONS:
+        raise ValueError(f"configuration 'version' must be v2 or v3, got '{raw}'")
+    return raw
+
+
 # Mosaic touchpoint columns, read from each exported touchpoint.
 TOUCHPOINT_COLUMNS: dict[str, str] = {
     "touchpoint_id": "STRING",
@@ -385,6 +400,7 @@ def schema(configuration: dict) -> list[dict]:
     _resolve_custom_events_start(configuration)
     _resolve_contact_events_start(configuration)
     _resolve_touchpoints_start(configuration)
+    _resolve_version(configuration)
 
     tables: list[dict] = (
         [
@@ -482,18 +498,39 @@ def update(configuration: dict, state: dict) -> Iterable[Any]:
     log.info(f"Conversion connector: starting sync of {', '.join(sorted(enabled))}")
 
     # Contacts ---------------------------------------------------------------
+    # v2 upserts live contacts. v3 also deletes deleted contacts, and a new walk
+    # truncates the table. Each version keeps its own cursor, since v2 can't read
+    # a v3 cursor: v3 starts from the v2 cursor, which it accepts, and switching
+    # back to v2 resumes the v2 cursor from where v3 took over.
     if "contacts" in enabled:
-        yield from _sync_stream(
-            base_url=base_url,
-            api_key=api_key,
-            table="contacts",
-            path="/v2/exports/contacts",
-            body_extra={},
-            rows_key="contacts",
-            state=state,
-            state_key="contacts_cursor",
-            row_mapper=_map_contact,
-        )
+        if _resolve_version(configuration) == "v3":
+            if state.get("contacts_cursor") and not state.get("contacts_v3_cursor"):
+                state["contacts_v3_cursor"] = state["contacts_cursor"]
+            yield from _sync_stream(
+                base_url=base_url,
+                api_key=api_key,
+                table="contacts",
+                path="/v3/exports/contacts",
+                body_extra={},
+                rows_key="contacts",
+                state=state,
+                state_key="contacts_v3_cursor",
+                row_mapper=_map_contact,
+                deleted_key="deleted",
+                truncate_new_walk=True,
+            )
+        else:
+            yield from _sync_stream(
+                base_url=base_url,
+                api_key=api_key,
+                table="contacts",
+                path="/v2/exports/contacts",
+                body_extra={},
+                rows_key="contacts",
+                state=state,
+                state_key="contacts_cursor",
+                row_mapper=_map_contact,
+            )
 
     # Email events -----------------------------------------------------------
     # Read from the contact events export, one type per table. Its cursors wrap
@@ -600,11 +637,20 @@ def _sync_stream(
     state_key: str,
     row_mapper: Callable[[dict], dict],
     first_page_extra: dict[str, Any] | None = None,
+    deleted_key: str | None = None,
+    truncate_new_walk: bool = False,
 ) -> Iterable[Any]:
     """Page one table to exhaustion, upserting rows and checkpointing cursors.
 
     ``body_extra`` is sent on every request; ``first_page_extra`` only when no
     cursor exists yet (for endpoints whose cursor carries the initial range).
+
+    ``deleted_key`` names the flag that marks a deleted row, which is deleted
+    instead of upserted. Rows apply in page order, since the API lists an id's
+    later state after its earlier one. With ``truncate_new_walk``, a walk with no
+    stored cursor empties the table once its first page arrives: the API reports
+    only the deletions it has recorded, so rows left from before (such as after
+    a re-sync) would otherwise never be removed.
 
     Paging is driven by the API's ``pagination.nextCursor``, NOT by page length —
     a short page is not end-of-stream. ListContactsV5 silently drops ids that are
@@ -617,6 +663,8 @@ def _sync_stream(
     page_count = 0
     row_count = 0
 
+    truncate_pending = truncate_new_walk and not cursor
+
     while True:
         body: dict[str, Any] = {"limit": PAGE_LIMIT, **body_extra}
         if cursor:
@@ -628,8 +676,14 @@ def _sync_stream(
         data = payload.get("data") or {}
         rows = data.get(rows_key) or []
 
+        if truncate_pending:
+            yield op.truncate(table)
+            truncate_pending = False
         for raw in rows:
-            yield op.upsert(table=table, data=row_mapper(raw))
+            if deleted_key and raw.get(deleted_key):
+                yield op.delete(table=table, keys={"id": raw["id"]})
+            else:
+                yield op.upsert(table=table, data=row_mapper(raw))
 
         row_count += len(rows)
         page_count += 1

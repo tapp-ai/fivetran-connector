@@ -4,5 +4,6 @@
   "tables": "contacts,email",
   "custom_events_start": "2020-01-01T00:00:00Z",
   "contact_events_start": "2020-01-01T00:00:00Z",
-  "touchpoints_start": "2020-01-01T00:00:00Z"
+  "touchpoints_start": "2020-01-01T00:00:00Z",
+  "version": "v2"
 }

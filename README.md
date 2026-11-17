@@ -20,7 +20,7 @@ there.
 
 | Table                     | Group           | Source                                         | Primary key | Notes                                                                                                                                |
 | ------------------------- | --------------- | ---------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `contacts`                | `contacts`      | `POST /v2/exports/contacts`                    | `id`        | One row per contact. Every contact field is flattened in as its own column keyed by its common name (e.g. `first_name`, `owner_id`). |
+| `contacts`                | `contacts`      | `POST /v2/exports/contacts`, or `/v3` with `version` | `id`        | One row per contact. Every contact field is flattened in as its own column keyed by its common name (e.g. `first_name`, `owner_id`). |
 | `custom_events`           | `custom_events` | `POST /v2/exports/custom-events`               | `event_id`  | One row per custom (behavioral) event. Opt-in: not synced unless listed in `tables`.                                                 |
 | `email_send`              | `email`         | `POST /v2/exports/contact-events` (`EMAIL_SEND`) | `event_id`  | One row per send event.                                                                                                              |
 | `email_delivery`          | `email`         | `…` (`EMAIL_DELIVERY`)                         | `event_id`  | The email was accepted by the recipient's mail server.                                                                               |
@@ -260,6 +260,18 @@ It checkpoints `state` after every page, so progress is durable and the next
 sync resumes from the stored cursor. Rows are upserted by primary key
 (`id` / `event_id`), so any row the API re-emits updates in place.
 
+With `version` set to `v3`, `contacts` also deletes rows. The
+v3 export lists live and deleted contacts in one `contacts` list, in the order
+to apply them, and the connector deletes a row with `deleted: true` instead of
+upserting it. A `contacts` walk with no
+stored cursor (the first sync, or a resync of the table) truncates the table
+first: the API replays every deletion it has recorded, but not those from
+before it started recording them. A restored
+contact comes back as an upsert. Each version keeps its own cursor
+(`contacts_cursor`, `contacts_v3_cursor`). The v3 export accepts a v2 cursor, so
+switching a connection to v3 resumes its walk without a truncate, and switching
+back to v2 resumes the v2 cursor from where v3 took over.
+
 The contact event tables work like `custom_events`: each table's first request
 sends its family in `parentTypes` and `{"occurredAt": {"start": <contact_events_start>}}`,
 and every later request sends only the stored cursor.
@@ -292,7 +304,8 @@ cp configuration.example.json configuration.json
 #   "tables": "contacts,email",                    # optional; see Table selection
 #   "custom_events_start": "2020-01-01T00:00:00Z", # optional; first-sync floor for custom_events
 #   "contact_events_start": "2020-01-01T00:00:00Z", # optional; first-sync floor for the contact event tables
-#   "touchpoints_start": "2020-01-01T00:00:00Z"     # optional; first-sync floor for touchpoints
+#   "touchpoints_start": "2020-01-01T00:00:00Z",    # optional; first-sync floor for touchpoints
+#   "version": "v2"                                 # optional; v3 also syncs deleted contacts
 # }
 ```
 
@@ -305,6 +318,11 @@ earliest `occurred_at` the first `custom_events` sync backfills. It is only
 read when no cursor exists yet, so changing it on an existing connection has no
 effect until you resync the connector. `contact_events_start` and
 `touchpoints_start` do the same for the contact event tables and touchpoints.
+
+`version` (`v2` or `v3`, default `v2`) picks the API version the connector
+reads. Only `contacts` differs: `v3` also deletes contacts deleted in Conversion
+(see Incremental sync). It rolls out one connection at a time, so `v2` stays
+the default.
 
 ## Development
 
