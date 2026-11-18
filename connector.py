@@ -426,6 +426,7 @@ def schema(configuration: dict) -> list[dict]:
                 "columns": {
                     "event_id": "STRING",
                     "contact_id": "STRING",
+                    "user_id": "STRING",
                     "occurred_at": "UTC_DATETIME",
                     "event_type": "STRING",
                     "source_type": "STRING",
@@ -811,6 +812,7 @@ def _map_email_event(event: dict) -> dict:
     return {
         "event_id": event.get("eventId"),
         "contact_id": event.get("contactId"),
+        "user_id": email.get("userId"),
         "occurred_at": _normalize_ts(event.get("occurredAt")),
         "event_type": event.get("eventType"),
         "source_type": event.get("sourceType"),

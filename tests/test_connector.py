@@ -108,6 +108,7 @@ def test_schema_declares_contacts_and_email_tables():
     assert names == ["contacts"] + [table for table, _ in connector.EMAIL_STREAMS]
     assert tables[0]["primary_key"] == ["id"]
     assert all(t["primary_key"] == ["event_id"] for t in tables[1:])
+    assert all(t["columns"]["user_id"] == "STRING" for t in tables[1:])
 
 
 def test_schema_requires_config():
@@ -286,6 +287,7 @@ def test_update_flattens_fields_splits_sfdc_and_paginates(patch_requests):
                                     "sourceType": "BLAST",
                                     "sourceId": "blast1",
                                     "email": {
+                                        "userId": "user-1",
                                         "emailId": "em1",
                                         "emailName": "Welcome",
                                         "sentEmailId": "se1",
@@ -325,6 +327,7 @@ def test_update_flattens_fields_splits_sfdc_and_paginates(patch_requests):
         assert len(rows) == 1 and rows[0]["event_id"] == f"ev-{et}"
         assert rows[0]["event_type"] == et
         assert rows[0]["email_name"] == "Welcome"
+        assert rows[0]["user_id"] == "user-1"
         assert rows[0]["source_type"] == "BLAST" and "source" not in rows[0]
     click = [o[2] for o in upserts if o[1] == "email_click"][0]
     assert click["link"] == "http://x"
