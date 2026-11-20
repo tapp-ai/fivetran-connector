@@ -175,7 +175,7 @@ Each table adds the columns of its family:
 | `workflow_events`        | `workflow_id`, `workflow_run_id` (ties one run's events together), `workflow_node_id`                                                                          |
 | `audience_events`        | `audience_id`                                                                                                                                                 |
 | `field_changes`          | `field_key` (the contact field's key, as in the `contacts` columns), `old_value`, `new_value`                                                                  |
-| `lead_conversions`       | `old_salesforce_lead_id`, `new_salesforce_contact_id`                                                                                                         |
+| `lead_conversions`       | No additional event fields.                                                                                                         |
 
 
 The web columns are `session_id`, `tracking_id`, `referrer`, `utm_source`,

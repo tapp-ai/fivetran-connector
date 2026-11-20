@@ -265,7 +265,7 @@ CONTACT_EVENT_STREAMS: list[tuple[str, str, str, dict[str, str]]] = [
         "lead_conversions",
         "SFDC_LEAD_CONVERTED",
         "leadConversion",
-        {"old_salesforce_lead_id": "STRING", "new_salesforce_contact_id": "STRING"},
+        {},
     ),
 ]
 
