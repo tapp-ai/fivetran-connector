@@ -3,7 +3,7 @@ name = "conversion-fivetran-connector"
 version = "0.1.0"
 description = "Fivetran Connector SDK connector that exports Conversion contacts and per-event email engagement into a data warehouse."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Conversion" }]
@@ -36,7 +36,7 @@ package = false
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
